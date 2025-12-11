@@ -1,0 +1,13 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+
+namespace FlashHttp.Server;
+public class FlashHttpServerOptions
+{
+    public int Port { get; set; } = 80;
+    public IPAddress BindingAddress { get; set; } = IPAddress.Any;
+    public X509Certificate2? Certificate { get; set; }
+}
