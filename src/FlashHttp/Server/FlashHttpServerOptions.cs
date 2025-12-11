@@ -8,6 +8,6 @@ namespace FlashHttp.Server;
 public class FlashHttpServerOptions
 {
     public int Port { get; set; } = 80;
-    public IPAddress BindingAddress { get; set; } = IPAddress.Any;
+    public IPAddress Address { get; set; } = IPAddress.Any;
     public X509Certificate2? Certificate { get; set; }
 }

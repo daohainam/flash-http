@@ -25,12 +25,12 @@ public class FlashHttpServerBuilder
     }
     public FlashHttpServerBuilder WithBindingAddress(IPAddress address)
     {
-        _options.BindingAddress = address;
+        _options.Address = address;
         return this;
     }
     public FlashHttpServerBuilder WithBindingAddress(string address)
     {
-        _options.BindingAddress = IPAddress.Parse(address);
+        _options.Address = IPAddress.Parse(address);
         return this;
     }
     public FlashHttpServerBuilder WithCertificate(X509Certificate2 certificate)

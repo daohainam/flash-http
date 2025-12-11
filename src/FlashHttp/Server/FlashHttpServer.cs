@@ -1,51 +1,60 @@
-﻿namespace FlashHttp.Server;
-public class FlashHttpServer
+﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using System;
+using System.IO;
+using System.Net.Http;
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
+
+namespace FlashHttp.Server;
+public class FlashHttpServer: IDisposable
 {
     private readonly FlashHttpServerOptions _options;
+    private readonly ILogger<FlashHttpServer> _logger;
 
-    public FlashHttpServer(FlashHttpServerOptions options)
+    private readonly HandlerSet handlerSet = new();
+    private TcpListener? listener;
+
+    public FlashHttpServer(FlashHttpServerOptions options, ILogger<FlashHttpServer>? logger = null)
     {
         _options = options;
+        _logger = logger ?? NullLogger<FlashHttpServer>.Instance;
     }
 
-    public FlashHttpServer(Action<FlashHttpServerOptions>? configureOptions = null)
+    public FlashHttpServer(Action<FlashHttpServerOptions>? configureOptions = null, ILogger<FlashHttpServer>? logger = null)
     {
         _options = new FlashHttpServerOptions();
         configureOptions?.Invoke(_options);
-    }
 
-    private readonly Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>> _onGetHandlers = [];
-    private readonly Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>> _onPostHandlers = [];
-    private readonly Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>> _onPutHandlers = [];
-    private readonly Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>> _onDeleteHandlers = [];
-    private readonly Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>> _onHeadHandlers = [];
-    private readonly Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>> _onPatchHandlers = [];
-    private readonly Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>> _onOptionsHandlers = [];
+        _logger = logger ?? NullLogger<FlashHttpServer>.Instance;
+    }
 
     public FlashHttpServer WithHandler(HttpMethodsEnum method, string path, Action<FlashHttpRequest, FlashHttpResponse> handler)
     {
         switch (method)
         {
             case HttpMethodsEnum.Get:
-                _onGetHandlers[path] = handler;
+                handlerSet.OnGetHandlers[path] = handler;
                 break;
             case HttpMethodsEnum.Post:
-                _onPostHandlers[path] = handler;
+                handlerSet.OnPostHandlers[path] = handler;
                 break;
             case HttpMethodsEnum.Put:
-                _onPutHandlers[path] = handler;
+                handlerSet.OnPutHandlers[path] = handler;
                 break;
             case HttpMethodsEnum.Delete:
-                _onDeleteHandlers[path] = handler;
+                handlerSet.OnDeleteHandlers[path] = handler;
                 break;
             case HttpMethodsEnum.Head:
-                _onHeadHandlers[path] = handler;
+                handlerSet.OnHeadHandlers[path] = handler;
                 break;
             case HttpMethodsEnum.Patch:
-                _onPatchHandlers[path] = handler;
+                handlerSet.OnPatchHandlers[path] = handler;
                 break;
             case HttpMethodsEnum.Options:
-                _onOptionsHandlers[path] = handler;
+                handlerSet.OnOptionsHandlers[path] = handler;
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(method), method, null);
@@ -54,4 +63,102 @@ public class FlashHttpServer
         return this;
     }
 
+    public async Task StartAsync(CancellationToken cancellationToken = default)
+    {
+        listener = new TcpListener(_options.Address, _options.Port);
+        listener.Start();
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                TcpClient client = await listener.AcceptTcpClientAsync(cancellationToken);
+
+                Task t = HandleNewClientConnectionAsync(client, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                if (_logger.IsEnabled(LogLevel.Information))
+                {
+                    _logger.LogInformation("Server socket stopped listening on {address}:{port}", _options.Address, _options.Port);
+                }
+                break;
+            }
+            catch (Exception ex)
+            {
+                if (_logger.IsEnabled(LogLevel.Error))
+                {
+                    _logger.LogError(ex, "Error accepting client socket on {address}:{port}", _options.Address, _options.Port);
+                }
+                break;
+            }
+        }
+
+        listener.Stop();
+    }
+
+    private async Task HandleNewClientConnectionAsync(TcpClient tcpClient, CancellationToken cancellationToken)
+    {
+        try
+        {
+            Stream stream = tcpClient.GetStream();
+            bool isHttps = false;
+            if (_options.Certificate != null)
+            {
+                var sslStream = new SslStream(stream);
+
+                SslServerAuthenticationOptions options = new()
+                {
+                    ApplicationProtocols =
+                    [
+                        SslApplicationProtocol.Http11
+                    ],
+                    ServerCertificate = _options.Certificate,
+                    EnabledSslProtocols = SslProtocols.None, // use the system default version
+                    ClientCertificateRequired = false,
+                };
+
+                await sslStream.AuthenticateAsServerAsync(options, cancellationToken);
+
+                stream = sslStream;
+                isHttps = true;
+            }
+
+
+        }
+        catch (AuthenticationException ex)
+        {
+            _logger.LogError(ex, "Error accepting client");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error accepting client");
+        }
+        finally 
+        {
+            tcpClient.Close();
+            tcpClient.Dispose();
+        }
+    }
+
+    public async Task StopAsync(CancellationToken cancellationToken = default)
+    {
+        listener?.Stop();
+        listener = null;
+    }
+
+    public void Dispose()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            listener?.Stop();
+            listener = null;
+        }
+    }
 }
