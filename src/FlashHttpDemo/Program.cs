@@ -1,13 +1,12 @@
 ﻿using FlashHttp.Server;
+using FlashHttpDemo;
 
-var serverBuilder = new FlashHttpServerBuilder().WithPort(8080);
-var server = serverBuilder.Build();
-
-server.WithGetHandler("/", (request, response) =>
-{
-    //response.StatusCode = 200;
-    //response.Headers["Content-Type"] = "text/plain";
-    //response.Body = System.Text.Encoding.UTF8.GetBytes("Hello, FlashHttp!");
+var builder = Host.CreateApplicationBuilder(args);
+builder.Services.AddSingleton(new FlashHttpServerOptions() { 
+    Port = 8080 
 });
+builder.Services.AddHostedService<Worker>();
 
-await server.StartAsync();
+var host = builder.Build();
+host.Run();
+

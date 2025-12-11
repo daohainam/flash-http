@@ -5,5 +5,6 @@ using System.Text;
 namespace FlashHttp;
 public enum HttpVersions
 {
-    Http11
+    Http11,
+    Http2
 }

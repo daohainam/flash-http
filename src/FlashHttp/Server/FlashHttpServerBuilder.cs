@@ -1,13 +1,20 @@
-﻿using System.Net;
+﻿using Microsoft.Extensions.Logging;
+using System.Net;
 using System.Security.Cryptography.X509Certificates;
 
 namespace FlashHttp.Server;
 public class FlashHttpServerBuilder
 {
     private readonly FlashHttpServerOptions _options;
+    private ILogger? _logger;
+
     public FlashHttpServerBuilder()
     {
         _options = new FlashHttpServerOptions();
+    }
+    public FlashHttpServerBuilder(FlashHttpServerOptions options)
+    {
+        _options = options;
     }
     public FlashHttpServerBuilder ConfigureOptions(Action<FlashHttpServerOptions> configureOptions)
     {
@@ -16,7 +23,7 @@ public class FlashHttpServerBuilder
     }
     public FlashHttpServer Build()
     {
-        return new FlashHttpServer(_options);
+        return new FlashHttpServer(_options, _logger);
     }
     public FlashHttpServerBuilder WithPort(int port) 
     {
@@ -41,6 +48,11 @@ public class FlashHttpServerBuilder
     public FlashHttpServerBuilder WithCertificateFile(string certificatePath)
     {
         _options.Certificate = X509CertificateLoader.LoadCertificateFromFile(certificatePath);
+        return this;
+    }
+    public FlashHttpServerBuilder WithLogger(ILogger logger)
+    {
+        _logger = logger;
         return this;
     }
 

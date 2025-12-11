@@ -1,29 +1,25 @@
 ﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using System;
-using System.IO;
-using System.Net.Http;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
-using System.Security.Cryptography.X509Certificates;
 
 namespace FlashHttp.Server;
 public class FlashHttpServer: IDisposable
 {
     private readonly FlashHttpServerOptions _options;
-    private readonly ILogger<FlashHttpServer> _logger;
+    private readonly ILogger _logger;
 
     private readonly HandlerSet handlerSet = new();
     private TcpListener? listener;
 
-    public FlashHttpServer(FlashHttpServerOptions options, ILogger<FlashHttpServer>? logger = null)
+    public FlashHttpServer(FlashHttpServerOptions options, ILogger? logger = null)
     {
         _options = options;
         _logger = logger ?? NullLogger<FlashHttpServer>.Instance;
     }
 
-    public FlashHttpServer(Action<FlashHttpServerOptions>? configureOptions = null, ILogger<FlashHttpServer>? logger = null)
+    public FlashHttpServer(Action<FlashHttpServerOptions>? configureOptions = null, ILogger? logger = null)
     {
         _options = new FlashHttpServerOptions();
         configureOptions?.Invoke(_options);
@@ -65,6 +61,11 @@ public class FlashHttpServer: IDisposable
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
+        if (_logger.IsEnabled(LogLevel.Information))
+        {
+            _logger.LogInformation("Starting listening on {address}:{port}", _options.Address, _options.Port);
+        }
+
         listener = new TcpListener(_options.Address, _options.Port);
         listener.Start();
 
@@ -99,6 +100,9 @@ public class FlashHttpServer: IDisposable
 
     private async Task HandleNewClientConnectionAsync(TcpClient tcpClient, CancellationToken cancellationToken)
     {
+        if (_logger.IsEnabled(LogLevel.Information))
+            _logger.LogInformation("Accepted new client connection from {remoteEndPoint}", tcpClient.Client.RemoteEndPoint);
+
         try
         {
             Stream stream = tcpClient.GetStream();
@@ -124,7 +128,9 @@ public class FlashHttpServer: IDisposable
                 isHttps = true;
             }
 
-
+            var connection = new FlashHttpConnection(stream, isHttps, handlerSet, _logger);
+            await connection.ProcessRequestsAsync(cancellationToken);
+            await connection.CloseAsync(cancellationToken);
         }
         catch (AuthenticationException ex)
         {
