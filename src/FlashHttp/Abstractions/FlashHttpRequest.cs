@@ -1,11 +1,10 @@
-﻿using FlashHttp.Abstractions;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Net;
 using System.Text;
 
-namespace FlashHttp;
+namespace FlashHttp.Abstractions;
 public class FlashHttpRequest
 {
     public HttpMethodsEnum Method { get; set; } = HttpMethodsEnum.Get;

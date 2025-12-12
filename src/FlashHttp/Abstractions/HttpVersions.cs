@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Text;
 
-namespace FlashHttp;
+namespace FlashHttp.Abstractions;
 public enum HttpVersions
 {
     Http11,

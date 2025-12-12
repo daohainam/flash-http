@@ -1,9 +1,8 @@
-﻿using FlashHttp.Abstractions;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text;
 
-namespace FlashHttp;
+namespace FlashHttp.Abstractions;
 
 public class FlashHttpResponse
 {
