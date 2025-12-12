@@ -9,7 +9,7 @@ public sealed class Worker(FlashHttpServerOptions options, ILogger<Worker> logge
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var server = new FlashHttpServerBuilder(options).WithLogger(logger).Build();
+        var server = new FlashHttpServerBuilder(options).Build();
 
         server.WithGetHandler("/", (request, response) =>
         {

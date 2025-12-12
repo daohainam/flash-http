@@ -29,7 +29,7 @@ internal class FlashHttpConnection
         this.logger = logger;
     }
 
-    internal async Task CloseAsync(CancellationToken cancellationToken)
+    internal async Task Close()
     {
         stream.Flush();
         await stream.DisposeAsync();
@@ -37,16 +37,35 @@ internal class FlashHttpConnection
 
     internal async Task ProcessRequestsAsync(CancellationToken cancellationToken)
     {
-        var inputPipe = new Pipe();
-        var outputWriter = PipeWriter.Create(stream);
+        try
+        {
+            var inputPipe = new Pipe();
+            var outputWriter = PipeWriter.Create(stream);
 
-        // Read from stream and fill pipe
-        var reading = FillPipeAsync(stream, inputPipe.Writer, cancellationToken);
+            var reading = FillPipeAsync(stream, inputPipe.Writer, cancellationToken);
+            var readingRequests = ReadPipeAsync(inputPipe.Reader, outputWriter, cancellationToken);
 
-        // Read from pipe and process requests
-        var readingRequests = ReadPipeAsync(inputPipe.Reader, outputWriter, cancellationToken);
+            await Task.WhenAll(reading, readingRequests);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Unhandled exception in connection");
+        }
+        finally
+        {
+            try
+            {
+                await stream.DisposeAsync();
+            }
+            catch { }
 
-        await Task.WhenAll(reading, readingRequests);
+            try
+            {
+                tcpClient.Close();
+                tcpClient.Dispose();
+            }
+            catch { }
+        }
     }
 
     private static async Task FillPipeAsync(Stream stream, PipeWriter writer, CancellationToken cancellationToken)
@@ -82,13 +101,10 @@ internal class FlashHttpConnection
 
         while (!connectionClose)
         {
-            CancellationTokenSource timeoutCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutCancellationTokenSource.CancelAfter(TimeSpan.FromSeconds(120)); 
-
             ReadResult result = await reader.ReadAsync(cancellationToken);
             ReadOnlySequence<byte> buffer = result.Buffer;
 
-            while (TryReadHttpRequest(ref buffer, out var request, out bool keepAlive) && !timeoutCancellationTokenSource.Token.IsCancellationRequested)
+            while (TryReadHttpRequest(ref buffer, out var request, out bool keepAlive))
             {
                 if (logger.IsEnabled(LogLevel.Information))
                 {
@@ -108,7 +124,7 @@ internal class FlashHttpConnection
                 }
             }
 
-            if (timeoutCancellationTokenSource.IsCancellationRequested)
+            if (cancellationToken.IsCancellationRequested)
             {
                 if (logger.IsEnabled(LogLevel.Warning))
                 {
@@ -163,7 +179,7 @@ internal class FlashHttpConnection
         string? connectionHeader = null;
         string contentType = "";
 
-        while (true)
+        while (tcpClient.Connected)
         {
             if (!TryReadLine(ref reader, out ReadOnlySequence<byte> headerLineSeq))
             {
@@ -257,10 +273,14 @@ internal class FlashHttpConnection
             bodySeq.CopyTo(body);
         }
 
-
         if (!Enum.TryParse(method, true, out HttpMethodsEnum methodEnum))
         {
             throw new InvalidOperationException($"Unsupported HTTP method: {method}");
+        }
+
+        if (!tcpClient.Connected)
+        {
+            throw new InvalidOperationException("TCP client disconnected");
         }
 
         request = new FlashHttpRequest

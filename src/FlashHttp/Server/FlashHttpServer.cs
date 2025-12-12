@@ -68,7 +68,7 @@ public class FlashHttpServer: IDisposable
         }
 
         listener = new TcpListener(_options.Address, _options.Port);
-        listener.Start();
+        listener.Start(1024);
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -76,7 +76,7 @@ public class FlashHttpServer: IDisposable
             {
                 TcpClient client = await listener.AcceptTcpClientAsync(cancellationToken);
 
-                Task t = HandleNewClientConnectionAsync(client, cancellationToken);
+                _ = Task.Run(() => HandleNewClientConnectionAsync(client, cancellationToken), cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -131,7 +131,6 @@ public class FlashHttpServer: IDisposable
 
             var connection = new FlashHttpConnection(tcpClient, stream, isHttps, handlerSet, _logger);
             await connection.ProcessRequestsAsync(cancellationToken);
-            await connection.CloseAsync(cancellationToken);
         }
         catch (AuthenticationException ex)
         {
@@ -140,11 +139,6 @@ public class FlashHttpServer: IDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error accepting client");
-        }
-        finally 
-        {
-            tcpClient.Close();
-            tcpClient.Dispose();
         }
     }
 
