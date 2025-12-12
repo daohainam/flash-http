@@ -8,12 +8,9 @@ namespace FlashHttp.Abstractions;
 public class FlashHttpRequest
 {
     public HttpMethodsEnum Method { get; set; } = HttpMethodsEnum.Get;
-    public string Host { get; init; } = "";
     public int Port { get; init; } = 80;
     public string Path { get; init; } = "/";
     public bool KeepAliveRequested { get; init; } = true;
-    public string Hash { get; init; } = "";
-    public string QueryString { get; init; } = "";
     public long ContentLength { get; init; } = 0;
     public string ContentType { get; init; } = "";
     public bool IsHttps { get; init; } = false;
@@ -23,3 +20,5 @@ public class FlashHttpRequest
     public List<HttpHeader> Headers { get; init; } = [];
     public byte[] Body { get; init; } = [];
 }
+
+

@@ -6,8 +6,8 @@ namespace FlashHttp.Abstractions;
 
 public class FlashHttpResponse
 {
-    public int StatusCode { get; internal set; } = 404;
-    public string ReasonPhrase { get; internal set; } = string.Empty;
-    public byte[] Body { get; internal set; } = [];
+    public int StatusCode { get; set; } = 404;
+    public string ReasonPhrase { get; set; } = string.Empty;
+    public byte[] Body { get; set; } = [];
     public List<HttpHeader> Headers { get; internal set; } = [];
 }

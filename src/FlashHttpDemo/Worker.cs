@@ -13,9 +13,9 @@ public sealed class Worker(FlashHttpServerOptions options, ILogger<Worker> logge
 
         server.WithGetHandler("/", (request, response) =>
         {
-            //response.StatusCode = 200;
-            //response.Headers["Content-Type"] = "text/plain";
-            //response.Body = System.Text.Encoding.UTF8.GetBytes("Hello, FlashHttp!");
+            response.StatusCode = 200;
+            response.Headers.Add(new FlashHttp.Abstractions.HttpHeader("Content-Type", "text/plain; charset=utf-8"));
+            response.Body = Encoding.UTF8.GetBytes("Hello, FlashHttp!");
         });
 
         await server.StartAsync(stoppingToken);

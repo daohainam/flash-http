@@ -2,7 +2,9 @@
 using Microsoft.Extensions.Logging;
 using System.Buffers;
 using System.IO.Pipelines;
+using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text;
 
 namespace FlashHttp.Server;
@@ -11,15 +13,16 @@ internal class FlashHttpConnection
 {
     private static readonly byte CR = (byte)'\r';
     private static readonly byte LF = (byte)'\n';
-    private const int StackAllocThreshold = 256;
+    private const int StackAllocThreshold = 128;
+    private readonly TcpClient tcpClient;
+    private readonly Stream stream;
+    private readonly bool isHttps;
+    private readonly HandlerSet handlerSet;
+    private readonly ILogger logger;
 
-    private Stream stream;
-    private bool isHttps;
-    private HandlerSet handlerSet;
-    private ILogger logger;
-
-    public FlashHttpConnection(Stream stream, bool isHttps, HandlerSet handlerSet, ILogger logger)
+    public FlashHttpConnection(TcpClient tcpClient, Stream stream, bool isHttps, HandlerSet handlerSet, ILogger logger)
     {
+        this.tcpClient = tcpClient;
         this.stream = stream;
         this.isHttps = isHttps;
         this.handlerSet = handlerSet;
@@ -46,14 +49,14 @@ internal class FlashHttpConnection
         await Task.WhenAll(reading, readingRequests);
     }
 
-    private static async Task FillPipeAsync(Stream stream, PipeWriter writer, CancellationToken ct)
+    private static async Task FillPipeAsync(Stream stream, PipeWriter writer, CancellationToken cancellationToken)
     {
         const int minimumBufferSize = 4096;
 
         while (true)
         {
             Memory<byte> memory = writer.GetMemory(minimumBufferSize);
-            int bytesRead = await stream.ReadAsync(memory, ct);
+            int bytesRead = await stream.ReadAsync(memory, cancellationToken);
 
             if (bytesRead == 0)
             {
@@ -62,7 +65,7 @@ internal class FlashHttpConnection
 
             writer.Advance(bytesRead);
 
-            FlushResult result = await writer.FlushAsync(ct);
+            FlushResult result = await writer.FlushAsync(cancellationToken);
 
             if (result.IsCompleted || result.IsCanceled)
             {
@@ -79,11 +82,19 @@ internal class FlashHttpConnection
 
         while (!connectionClose)
         {
+            CancellationTokenSource timeoutCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCancellationTokenSource.CancelAfter(TimeSpan.FromSeconds(120)); 
+
             ReadResult result = await reader.ReadAsync(cancellationToken);
             ReadOnlySequence<byte> buffer = result.Buffer;
 
-            while (TryReadHttpRequest(ref buffer, out var request, out bool keepAlive, cancellationToken))
+            while (TryReadHttpRequest(ref buffer, out var request, out bool keepAlive) && !timeoutCancellationTokenSource.Token.IsCancellationRequested)
             {
+                if (logger.IsEnabled(LogLevel.Information))
+                {
+                    logger.LogInformation("Received HTTP request: {Method} {Path}", request.Method, request.Path);
+                }
+
                 var response = new FlashHttpResponse();
 
                 await handlerSet.HandleAsync(request, response, cancellationToken);
@@ -95,6 +106,15 @@ internal class FlashHttpConnection
                     connectionClose = true;
                     break;
                 }
+            }
+
+            if (timeoutCancellationTokenSource.IsCancellationRequested)
+            {
+                if (logger.IsEnabled(LogLevel.Warning))
+                {
+                    logger.LogWarning("Connection timed out while reading HTTP request.");
+                }
+                break;
             }
 
             reader.AdvanceTo(buffer.Start, buffer.End);
@@ -109,11 +129,10 @@ internal class FlashHttpConnection
         await writer.CompleteAsync();
     }
 
-    public static bool TryReadHttpRequest(
+    public bool TryReadHttpRequest(
     ref ReadOnlySequence<byte> buffer,
     out FlashHttpRequest request,
-    out bool keepAlive,
-    CancellationToken cancellationToken)
+    out bool keepAlive)
     {
         request = default!;
         keepAlive = true;
@@ -131,12 +150,18 @@ internal class FlashHttpConnection
             throw new InvalidOperationException("Invalid HTTP request line");
         }
 
+        if (version != "HTTP/1.1")
+        {
+            throw new InvalidOperationException("Unsupported HTTP version");
+        }
+
         // 2. Headers
         var headers = new List<HttpHeader>(16);
 
         int contentLength = 0;
         bool hasContentLength = false;
         string? connectionHeader = null;
+        string contentType = "";
 
         while (true)
         {
@@ -183,6 +208,10 @@ internal class FlashHttpConnection
             {
                 connectionHeader = value;
             }
+            else if (name!.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
+            {
+                contentType = value ?? "";
+            }
         }
 
         if (connectionHeader is not null)
@@ -202,18 +231,16 @@ internal class FlashHttpConnection
             keepAlive = true;
         }
 
-        // 4. Body (chỉ support Content-Length, chưa support chunked)
+        // 4. Body
         ReadOnlySequence<byte> bodySeq = ReadOnlySequence<byte>.Empty;
 
         if (hasContentLength && contentLength > 0)
         {
             if (reader.Remaining < contentLength)
             {
-                // Chưa đủ body, chờ thêm
                 return false;
             }
 
-            // Body bắt đầu tại vị trí hiện tại của reader
             var bodyStart = reader.Position;
             var bodyEnd = buffer.GetPosition(contentLength, bodyStart);
 
@@ -230,9 +257,8 @@ internal class FlashHttpConnection
             bodySeq.CopyTo(body);
         }
 
-        HttpMethodsEnum methodEnum;
 
-        if (!Enum.TryParse(method, true, out methodEnum))
+        if (!Enum.TryParse(method, true, out HttpMethodsEnum methodEnum))
         {
             throw new InvalidOperationException($"Unsupported HTTP method: {method}");
         }
@@ -242,6 +268,14 @@ internal class FlashHttpConnection
             Method = methodEnum,
             Path = path,
             Headers = headers,
+            ContentLength = contentLength,
+            ContentType = contentType,
+            IsHttps = isHttps,
+            KeepAliveRequested = keepAlive,
+            RemoteAddress = (tcpClient.Client.RemoteEndPoint as IPEndPoint)?.Address,
+            RemotePort = (tcpClient.Client.RemoteEndPoint as IPEndPoint)?.Port ?? 0,
+            HttpVersion = HttpVersions.Http11,
+            Port = (tcpClient.Client.LocalEndPoint as IPEndPoint)?.Port ?? 0,
             Body = body
         };
 

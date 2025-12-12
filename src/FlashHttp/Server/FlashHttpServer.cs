@@ -129,7 +129,7 @@ public class FlashHttpServer: IDisposable
                 isHttps = true;
             }
 
-            var connection = new FlashHttpConnection(stream, isHttps, handlerSet, _logger);
+            var connection = new FlashHttpConnection(tcpClient, stream, isHttps, handlerSet, _logger);
             await connection.ProcessRequestsAsync(cancellationToken);
             await connection.CloseAsync(cancellationToken);
         }
