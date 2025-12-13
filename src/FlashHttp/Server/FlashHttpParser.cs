@@ -111,10 +111,6 @@ internal class FlashHttpParser
             {
                 keepAlive = false;
             }
-            else if (connectionHeader.Equals("keep-alive", StringComparison.OrdinalIgnoreCase))
-            {
-                keepAlive = true;
-            }
         }
         else
         {
