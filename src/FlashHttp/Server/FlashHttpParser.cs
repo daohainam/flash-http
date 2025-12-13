@@ -112,11 +112,6 @@ internal class FlashHttpParser
                 keepAlive = false;
             }
         }
-        else
-        {
-            // HTTP/1.1 default keep-alive
-            keepAlive = true;
-        }
 
         // 4. Body
         ReadOnlySequence<byte> bodySeq = ReadOnlySequence<byte>.Empty;
