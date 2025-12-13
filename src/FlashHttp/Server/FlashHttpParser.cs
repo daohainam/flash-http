@@ -139,10 +139,17 @@ internal class FlashHttpParser
             bodySeq.CopyTo(body);
         }
 
-        if (!Enum.TryParse(method, true, out HttpMethodsEnum methodEnum))
+        HttpMethodsEnum methodEnum = method switch
         {
-            throw new InvalidOperationException($"Unsupported HTTP method: {method}");
-        }
+            "GET" => HttpMethodsEnum.Get,
+            "POST" => HttpMethodsEnum.Post,
+            "PUT" => HttpMethodsEnum.Put,
+            "DELETE" => HttpMethodsEnum.Delete,
+            "HEAD" => HttpMethodsEnum.Head,
+            "PATCH" => HttpMethodsEnum.Patch,
+            "OPTIONS" => HttpMethodsEnum.Options,
+            _ => throw new InvalidOperationException($"Unsupported HTTP method: {method}")
+        };
 
         request = new FlashHttpRequest
         {
