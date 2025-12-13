@@ -11,6 +11,8 @@ namespace FlashHttp.Server;
 
 internal class FlashHttpConnection
 {
+    private static readonly byte[] Http11Bytes = Encoding.ASCII.GetBytes("HTTP/1.1 ");
+
     private readonly TcpClient tcpClient;
     private readonly Stream stream;
     private readonly bool isHttps;
@@ -181,7 +183,7 @@ internal class FlashHttpConnection
 
         // Status line
         // HTTP/1.1 200 OK\r\n
-        WriteAscii(writer, "HTTP/1.1 ");
+        WriteBytes(writer, Http11Bytes);
         WriteAscii(writer, response.StatusCode.ToString());
         WriteAscii(writer, " ");
         WriteAscii(writer, reason);
@@ -232,6 +234,13 @@ internal class FlashHttpConnection
         var span = writer.GetSpan(text.Length);
         int bytes = Encoding.ASCII.GetBytes(text.AsSpan(), span);
         writer.Advance(bytes);
+    }
+
+    private static void WriteBytes(PipeWriter writer, ReadOnlySpan<byte> bytes)
+    {
+        var span = writer.GetSpan(bytes.Length);
+        bytes.CopyTo(span);
+        writer.Advance(bytes.Length);
     }
 
     private static void WriteCRLF(PipeWriter writer)
