@@ -9,6 +9,7 @@ namespace BenchmarkSuite
 {
     // For more information on the VS BenchmarkDotNet Diagnosers see https://learn.microsoft.com/visualstudio/profiling/profiling-with-benchmark-dotnet
     [CPUUsageDiagnoser]
+    [MemoryDiagnoser]
     public class HttpParserBenchmarks
     {
         private ReadOnlySequence<byte> _buffer;
