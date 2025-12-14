@@ -19,6 +19,7 @@ public class FlashHttpRequest
     public HttpVersions HttpVersion { get; init; } = HttpVersions.Http11;
     public List<HttpHeader> Headers { get; init; } = [];
     public byte[] Body { get; init; } = [];
+    public string? Authorization { get; internal set; }
 }
 
 

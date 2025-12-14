@@ -4,8 +4,10 @@ using System.Collections.Generic;
 using System.Text;
 
 namespace FlashHttp.Server;
-internal class HandlerSet
+public class HandlerSet
 {
+    public delegate ValueTask FlashRequestDelegateAsync(FlashHttpRequest req, FlashHttpResponse res);
+
     public readonly Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>> OnGetHandlers = [];
     public readonly Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>> OnPostHandlers = [];
     public readonly Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>> OnPutHandlers = [];
@@ -14,7 +16,7 @@ internal class HandlerSet
     public readonly Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>> OnPatchHandlers = [];
     public readonly Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>> OnOptionsHandlers = [];
 
-    internal async Task HandleAsync(FlashHttpRequest request, FlashHttpResponse response, CancellationToken cancellationToken)
+    public async Task HandleAsync(FlashHttpRequest request, FlashHttpResponse response, CancellationToken cancellationToken)
     {
         Dictionary<string, Action<FlashHttpRequest, FlashHttpResponse>>? _handlers = null;
 
