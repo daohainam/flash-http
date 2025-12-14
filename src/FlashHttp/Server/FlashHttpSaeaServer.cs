@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Text;
 using FlashHttp.Abstractions;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FlashHttp.Server
 {
@@ -27,11 +28,11 @@ namespace FlashHttp.Server
 
         private static readonly Encoding Ascii = Encoding.ASCII;
 
-        public FlashHttpSaeaServer(FlashHttpServerOptions options, HandlerSet handlerSet, ILogger logger)
+        public FlashHttpSaeaServer(FlashHttpServerOptions options, HandlerSet handlerSet, ILogger? logger)
         {
             _options = options;
             _handlerSet = handlerSet;
-            _logger = logger;
+            _logger = logger ?? NullLogger<FlashHttpSaeaServer>.Instance;
         }
 
         public void Start()

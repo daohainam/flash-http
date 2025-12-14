@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
+using static FlashHttp.Server.HandlerSet;
 
 namespace FlashHttp.Server;
 public class FlashHttpServer: IDisposable
@@ -28,7 +29,7 @@ public class FlashHttpServer: IDisposable
         _logger = logger ?? NullLogger<FlashHttpServer>.Instance;
     }
 
-    public FlashHttpServer WithHandler(HttpMethodsEnum method, string path, Action<FlashHttpRequest, FlashHttpResponse> handler)
+    public FlashHttpServer WithHandler(HttpMethodsEnum method, string path, FlashRequestAsyncDelegate handler)
     {
         switch (method)
         {

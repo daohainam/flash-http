@@ -9,15 +9,16 @@ public sealed class Worker(FlashHttpServerOptions options, ILogger<Worker> logge
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var server = new FlashHttpServerBuilder(options).Build();
-
-        server.WithGetHandler("/", (request, response) =>
+        var handlerSet = new HandlerSet();
+        handlerSet.OnGetHandlers.Add("/", async (request, response, cancellationToken) =>
         {
             response.StatusCode = 200;
             response.Headers.Add(new FlashHttp.Abstractions.HttpHeader("Content-Type", "text/plain; charset=utf-8"));
             response.Body = Encoding.UTF8.GetBytes("Hello, FlashHttp!");
         });
 
-        await server.StartAsync(stoppingToken);
+        var server = new FlashHttpSaeaServer(options, handlerSet, null);
+
+        server.Start();
     }
 }
