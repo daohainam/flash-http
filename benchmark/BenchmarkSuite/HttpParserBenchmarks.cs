@@ -35,7 +35,7 @@ namespace BenchmarkSuite
         }
 
         [Benchmark]
-        public void ParseSimpleRequest()
+        public void ParseSimpleRequestWithHeaderList()
         {
             var buffer = _buffer; // IMPORTANT: copy, vì TryReadHttpRequest sẽ Slice()
             FlashHttpParser.TryReadHttpRequest(
@@ -43,8 +43,23 @@ namespace BenchmarkSuite
                 false,
                 _remote,
                 _local, 
-                out var req,
-                out var keepAlive);
+                out var _,
+                out var _,
+                false);
+        }
+
+        [Benchmark]
+        public void ParseSimpleRequestWithHeaderByteArray()
+        {
+            var buffer = _buffer; // IMPORTANT: copy, vì TryReadHttpRequest sẽ Slice()
+            FlashHttpParser.TryReadHttpRequest(
+                ref buffer,
+                false,
+                _remote,
+                _local,
+                out var _,
+                out var _,
+                true);
         }
     }
 }

@@ -23,7 +23,8 @@ internal class FlashHttpParser
         IPEndPoint? remoteEndPoint,
         IPEndPoint? localEndPoint,
         out FlashHttpRequest request,
-        out bool keepAlive)
+        out bool keepAlive,
+        bool useArrayHeaderCollection = false)
     {
         request = default!;
         keepAlive = true;
@@ -46,75 +47,84 @@ internal class FlashHttpParser
             throw new InvalidOperationException("Unsupported HTTP version");
         }
 
-        // 2. Headers
-        var headers = new List<HttpHeader>(16);
-
         int contentLength = 0;
         bool hasContentLength = false;
         string? connectionHeader = null;
         string contentType = "";
+        IEnumerable<HttpHeader> headers = [];
 
-        while (true)
+        if (useArrayHeaderCollection)
         {
-            if (!TryReadLine(ref reader, out ReadOnlySequence<byte> headerLineSeq))
-            {
-                return false;
-            }
+            var headerList = new List<HttpHeader>(16);
 
-            if (headerLineSeq.Length == 0)
+            while (true)
             {
-                break;
-            }
-
-            // Allocate a buffer on the heap if headerLineSeq.Length > 0
-            byte[]? tmp = null;
-            if (!TryParseHeaderLine(headerLineSeq, out string? name, out string? value))
-            {
-                int tmpLen = (int)headerLineSeq.Length;
-                if (tmpLen > 0)
+                if (!TryReadLine(ref reader, out ReadOnlySequence<byte> headerLineSeq))
                 {
-                    tmp = new byte[tmpLen];
-                    headerLineSeq.CopyTo(tmp);
+                    return false;
                 }
-                if (tmp == null || tmp.Length == 0 || (tmp.Length == 1 && tmp[0] == CR))
+
+                if (headerLineSeq.Length == 0)
+                {
                     break;
-
-                continue;
-            }
-
-            headers.Add(new HttpHeader(name!, value!));
-
-            // Some headers need special handling
-            if (!hasContentLength &&
-                name!.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
-            {
-                if (!int.TryParse(value, out contentLength) || contentLength < 0)
-                {
-                    throw new InvalidOperationException("Invalid Content-Length");
                 }
 
-                hasContentLength = true;
-            }
-            else if (name!.Equals("Connection", StringComparison.OrdinalIgnoreCase))
-            {
-                connectionHeader = value;
-            }
-            else if (name!.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
-            {
-                contentType = value ?? "";
-            }
-        }
+                // Allocate a buffer on the heap if headerLineSeq.Length > 0
+                byte[]? tmp = null;
+                if (!TryParseHeaderLine(headerLineSeq, out string? name, out string? value))
+                {
+                    int tmpLen = (int)headerLineSeq.Length;
+                    if (tmpLen > 0)
+                    {
+                        tmp = new byte[tmpLen];
+                        headerLineSeq.CopyTo(tmp);
+                    }
+                    if (tmp == null || tmp.Length == 0 || (tmp.Length == 1 && tmp[0] == CR))
+                        break;
 
-        if (connectionHeader is not null)
+                    continue;
+                }
+
+                headerList.Add(new HttpHeader(name!, value!));
+
+                // Some headers need special handling
+                if (!hasContentLength &&
+                    name!.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!int.TryParse(value, out contentLength) || contentLength < 0)
+                    {
+                        throw new InvalidOperationException("Invalid Content-Length");
+                    }
+
+                    hasContentLength = true;
+                }
+                else if (name!.Equals("Connection", StringComparison.OrdinalIgnoreCase))
+                {
+                    connectionHeader = value;
+                }
+                else if (name!.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
+                {
+                    contentType = value ?? "";
+                }
+            }
+
+            if (connectionHeader is not null)
+            {
+                if (connectionHeader.Equals("close", StringComparison.OrdinalIgnoreCase))
+                {
+                    keepAlive = false;
+                }
+            }
+
+            headers = headerList;
+        }
+        else
         {
-            if (connectionHeader.Equals("close", StringComparison.OrdinalIgnoreCase))
-            {
-                keepAlive = false;
-            }
+
         }
 
-        // 4. Body
-        ReadOnlySequence<byte> bodySeq = ReadOnlySequence<byte>.Empty;
+            // 4. Body
+            ReadOnlySequence<byte> bodySeq = ReadOnlySequence<byte>.Empty;
 
         if (hasContentLength && contentLength > 0)
         {
