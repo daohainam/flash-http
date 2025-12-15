@@ -1,4 +1,5 @@
 ﻿using FlashHttp.Abstractions;
+using FlashHttp.Extensions;
 using Microsoft.Extensions.Logging;
 using System.Buffers;
 using System.IO.Pipelines;
@@ -11,8 +12,6 @@ namespace FlashHttp.Server;
 
 internal class FlashHttpConnection
 {
-    private static readonly byte[] Http11Bytes = Encoding.ASCII.GetBytes("HTTP/1.1 ");
-
     private readonly TcpClient tcpClient;
     private readonly Stream stream;
     private readonly bool isHttps;
@@ -36,35 +35,16 @@ internal class FlashHttpConnection
 
     internal async Task ProcessRequestsAsync(CancellationToken cancellationToken)
     {
-        try
-        {
-            var inputPipe = new Pipe();
-            var outputWriter = PipeWriter.Create(stream);
+        var inputPipe = new Pipe();
+        var outputWriter = PipeWriter.Create(stream);
 
-            var reading = FillPipeAsync(stream, inputPipe.Writer, cancellationToken);
-            var readingRequests = ReadPipeAsync(inputPipe.Reader, outputWriter, cancellationToken);
+        // Read from stream and fill pipe
+        var reading = FillPipeAsync(stream, inputPipe.Writer, cancellationToken);
 
-            await Task.WhenAll(reading, readingRequests);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Unhandled exception in connection");
-        }
-        finally
-        {
-            try
-            {
-                await stream.DisposeAsync();
-            }
-            catch { }
+        // Read from pipe and process requests
+        var readingRequests = ReadPipeAsync(inputPipe.Reader, outputWriter, cancellationToken);
 
-            try
-            {
-                tcpClient.Close();
-                tcpClient.Dispose();
-            }
-            catch { }
-        }
+        await Task.WhenAll(reading, readingRequests);
     }
 
     private static async Task FillPipeAsync(Stream stream, PipeWriter writer, CancellationToken cancellationToken)
@@ -94,7 +74,7 @@ internal class FlashHttpConnection
         await writer.CompleteAsync();
     }
 
-    internal async Task ReadPipeAsync(PipeReader reader, PipeWriter writer, CancellationToken cancellationToken)
+    private async Task ReadPipeAsync(PipeReader reader, PipeWriter writer, CancellationToken cancellationToken)
     {
         bool connectionClose = false;
 
@@ -103,10 +83,25 @@ internal class FlashHttpConnection
             ReadResult result = await reader.ReadAsync(cancellationToken);
             ReadOnlySequence<byte> buffer = result.Buffer;
 
-            while (FlashHttpParser.TryReadHttpRequest(ref buffer,
-                isHttps, tcpClient.Client.RemoteEndPoint as IPEndPoint, tcpClient.Client.LocalEndPoint as IPEndPoint,
-                out var request, out bool keepAlive))
+            while (true)
             {
+                var localBuffer = buffer;
+
+                if (!FlashHttpParser.TryReadHttpRequest(
+                        ref localBuffer,
+                        out var request,
+                        out bool keepAlive,
+                        isHttps: isHttps,
+                        remoteEndPoint: tcpClient.Client.RemoteEndPoint as IPEndPoint,
+                        localEndPoint: tcpClient.Client.LocalEndPoint as IPEndPoint,
+                        materializeHeadersList: false))
+                {
+                    break; // need more data
+                }
+
+                // consumed
+                buffer = localBuffer;
+
                 if (logger.IsEnabled(LogLevel.Information))
                 {
                     logger.LogInformation("Received HTTP request: {Method} {Path}", request.Method, request.Path);
@@ -114,7 +109,15 @@ internal class FlashHttpConnection
 
                 var response = new FlashHttpResponse();
 
-                await handlerSet.HandleAsync(request, response, cancellationToken);
+                try
+                {
+                    await handlerSet.HandleAsync(request, response, cancellationToken);
+                }
+                finally
+                {
+                    // IMPORTANT: release pooled header storage
+                    request.ReleaseRawHeaders();
+                }
 
                 await WriteHttpResponseAsync(writer, response, keepAlive, cancellationToken);
 
@@ -123,15 +126,6 @@ internal class FlashHttpConnection
                     connectionClose = true;
                     break;
                 }
-            }
-
-            if (cancellationToken.IsCancellationRequested)
-            {
-                if (logger.IsEnabled(LogLevel.Warning))
-                {
-                    logger.LogWarning("Connection timed out while reading HTTP request.");
-                }
-                break;
             }
 
             reader.AdvanceTo(buffer.Start, buffer.End);
@@ -147,10 +141,10 @@ internal class FlashHttpConnection
     }
 
     private static async ValueTask WriteHttpResponseAsync(
-    PipeWriter writer,
-    FlashHttpResponse response,
-    bool keepAlive,
-    CancellationToken ct)
+        PipeWriter writer,
+        FlashHttpResponse response,
+        bool keepAlive,
+        CancellationToken ct)
     {
         var body = response.Body ?? Array.Empty<byte>();
 
@@ -183,7 +177,7 @@ internal class FlashHttpConnection
 
         // Status line
         // HTTP/1.1 200 OK\r\n
-        WriteBytes(writer, Http11Bytes);
+        WriteAscii(writer, "HTTP/1.1 ");
         WriteAscii(writer, response.StatusCode.ToString());
         WriteAscii(writer, " ");
         WriteAscii(writer, reason);
@@ -205,12 +199,10 @@ internal class FlashHttpConnection
         // Body
         if (body.Length > 0)
         {
-            writer.Write(body); // PipeWriterExtensions.Write(ReadOnlySpan<byte>)
+            writer.Write(body);
         }
 
-        FlushResult result = await writer.FlushAsync(ct);
-
-        // check result.IsCompleted/IsCanceled
+        await writer.FlushAsync(ct);
     }
 
     private static string GetReasonPhrase(int statusCode)
@@ -230,17 +222,9 @@ internal class FlashHttpConnection
 
     private static void WriteAscii(PipeWriter writer, string text)
     {
-        // Dự trù số byte cần
         var span = writer.GetSpan(text.Length);
         int bytes = Encoding.ASCII.GetBytes(text.AsSpan(), span);
         writer.Advance(bytes);
-    }
-
-    private static void WriteBytes(PipeWriter writer, ReadOnlySpan<byte> bytes)
-    {
-        var span = writer.GetSpan(bytes.Length);
-        bytes.CopyTo(span);
-        writer.Advance(bytes.Length);
     }
 
     private static void WriteCRLF(PipeWriter writer)

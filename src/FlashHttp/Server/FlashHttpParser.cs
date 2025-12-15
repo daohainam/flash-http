@@ -1,30 +1,35 @@
 ﻿using FlashHttp.Abstractions;
-using Microsoft.Extensions.Logging;
-using System;
+using FlashHttp.Extensions;
+using FlashHttp.Helpers;
 using System.Buffers;
-using System.Collections.Generic;
-using System.IO.Pipelines;
 using System.Net;
-using System.Net.Sockets;
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace FlashHttp.Server;
 
-internal class FlashHttpParser
+internal static class FlashHttpParser
 {
     private static readonly byte CR = (byte)'\r';
     private static readonly byte LF = (byte)'\n';
-    private const int StackAllocThreshold = 128;
+    private const int StackAllocThreshold = 256;
+
+    // Common header names (ASCII)
+    private static ReadOnlySpan<byte> HostName => "Host"u8;
+    private static ReadOnlySpan<byte> AuthorizationName => "Authorization"u8;
+    private static ReadOnlySpan<byte> ContentLengthName => "Content-Length"u8;
+    private static ReadOnlySpan<byte> ConnectionName => "Connection"u8;
+    private static ReadOnlySpan<byte> ContentTypeName => "Content-Type"u8;
+
+    private static readonly List<HttpHeader> EmptyHeadersList = new(0);
 
     public static bool TryReadHttpRequest(
         ref ReadOnlySequence<byte> buffer,
+        out FlashHttpRequest request,
+        out bool keepAlive,
         bool isHttps,
         IPEndPoint? remoteEndPoint,
         IPEndPoint? localEndPoint,
-        out FlashHttpRequest request,
-        out bool keepAlive,
-        bool useArrayHeaderCollection = false)
+        bool materializeHeadersList)
     {
         request = default!;
         keepAlive = true;
@@ -33,122 +38,116 @@ internal class FlashHttpParser
 
         // 1. Request line
         if (!TryReadLine(ref reader, out ReadOnlySequence<byte> requestLineSeq))
-        {
             return false;
-        }
 
         if (!TryParseRequestLine(requestLineSeq, out string method, out string path, out string version))
-        {
             throw new InvalidOperationException("Invalid HTTP request line");
-        }
 
-        if (version != "HTTP/1.1")
-        {
+        if (!string.Equals(version, "HTTP/1.1", StringComparison.Ordinal))
             throw new InvalidOperationException("Unsupported HTTP version");
-        }
+
+        // 2. Headers (raw)
+        var rawHeaders = FlashHttpHeadersPool.Rent();
 
         int contentLength = 0;
         bool hasContentLength = false;
-        string? connectionHeader = null;
-        string contentType = "";
-        IEnumerable<HttpHeader> headers = [];
+        string? connectionHeaderValue = null;
+        string contentType = string.Empty;
 
-        if (useArrayHeaderCollection)
+        while (true)
         {
-            var headerList = new List<HttpHeader>(16);
+            if (!TryReadLine(ref reader, out ReadOnlySequence<byte> headerLineSeq))
+                return false;
 
-            while (true)
+            if (headerLineSeq.Length == 0)
+                break;
+
+            int len = checked((int)headerLineSeq.Length);
+            Span<byte> line = len <= StackAllocThreshold ? stackalloc byte[len] : new byte[len];
+            headerLineSeq.CopyTo(line);
+
+            if (line.Length > 0 && line[^1] == CR)
+                line = line[..^1];
+
+            if (line.Length == 0)
+                continue;
+
+            int colon = line.IndexOf((byte)':');
+            if (colon <= 0)
+                continue;
+
+            ReadOnlySpan<byte> name = TrimAsciiWhitespace(line[..colon]);
+            ReadOnlySpan<byte> value = TrimAsciiWhitespace(line[(colon + 1)..]);
+
+            if (name.Length == 0)
+                continue;
+
+            int idx = rawHeaders.Add(name, value);
+
+            // Record known header indices (first occurrence wins)
+            if (AsciiEqualsIgnoreCase(name, HostName))
+                rawHeaders.SetKnownIndex(KnownHeader.Host, idx);
+            else if (AsciiEqualsIgnoreCase(name, AuthorizationName))
+                rawHeaders.SetKnownIndex(KnownHeader.Authorization, idx);
+            else if (AsciiEqualsIgnoreCase(name, ContentTypeName))
+                rawHeaders.SetKnownIndex(KnownHeader.ContentType, idx);
+            else if (AsciiEqualsIgnoreCase(name, ConnectionName))
+                rawHeaders.SetKnownIndex(KnownHeader.Connection, idx);
+            else if (AsciiEqualsIgnoreCase(name, ContentLengthName))
+                rawHeaders.SetKnownIndex(KnownHeader.ContentLength, idx);
+
+            // Parse "hot" headers into request fields
+            if (!hasContentLength && AsciiEqualsIgnoreCase(name, ContentLengthName))
             {
-                if (!TryReadLine(ref reader, out ReadOnlySequence<byte> headerLineSeq))
-                {
-                    return false;
-                }
-
-                if (headerLineSeq.Length == 0)
-                {
-                    break;
-                }
-
-                // Allocate a buffer on the heap if headerLineSeq.Length > 0
-                byte[]? tmp = null;
-                if (!TryParseHeaderLine(headerLineSeq, out string? name, out string? value))
-                {
-                    int tmpLen = (int)headerLineSeq.Length;
-                    if (tmpLen > 0)
-                    {
-                        tmp = new byte[tmpLen];
-                        headerLineSeq.CopyTo(tmp);
-                    }
-                    if (tmp == null || tmp.Length == 0 || (tmp.Length == 1 && tmp[0] == CR))
-                        break;
-
-                    continue;
-                }
-
-                headerList.Add(new HttpHeader(name!, value!));
-
-                // Some headers need special handling
-                if (!hasContentLength &&
-                    name!.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (!int.TryParse(value, out contentLength) || contentLength < 0)
-                    {
-                        throw new InvalidOperationException("Invalid Content-Length");
-                    }
-
-                    hasContentLength = true;
-                }
-                else if (name!.Equals("Connection", StringComparison.OrdinalIgnoreCase))
-                {
-                    connectionHeader = value;
-                }
-                else if (name!.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
-                {
-                    contentType = value ?? "";
-                }
+                if (!FlashHttpHeaders.TryParseInt32(value, out contentLength) || contentLength < 0)
+                    throw new InvalidOperationException("Invalid Content-Length");
+                hasContentLength = true;
             }
-
-            if (connectionHeader is not null)
+            else if (AsciiEqualsIgnoreCase(name, ConnectionName))
             {
-                if (connectionHeader.Equals("close", StringComparison.OrdinalIgnoreCase))
-                {
-                    keepAlive = false;
-                }
+                connectionHeaderValue = Encoding.ASCII.GetString(value);
             }
+            else if (AsciiEqualsIgnoreCase(name, ContentTypeName))
+            {
+                contentType = Encoding.ASCII.GetString(value);
+            }
+        }
 
-            headers = headerList;
+        // 3. Keep-Alive default
+        if (connectionHeaderValue is not null)
+        {
+            if (connectionHeaderValue.Equals("close", StringComparison.OrdinalIgnoreCase))
+                keepAlive = false;
+            else if (connectionHeaderValue.Equals("keep-alive", StringComparison.OrdinalIgnoreCase))
+                keepAlive = true;
         }
         else
         {
-
+            keepAlive = true;
         }
 
-            // 4. Body
-            ReadOnlySequence<byte> bodySeq = ReadOnlySequence<byte>.Empty;
+        // 4. Body
+        ReadOnlySequence<byte> bodySeq = ReadOnlySequence<byte>.Empty;
 
         if (hasContentLength && contentLength > 0)
         {
             if (reader.Remaining < contentLength)
-            {
                 return false;
-            }
 
             var bodyStart = reader.Position;
             var bodyEnd = buffer.GetPosition(contentLength, bodyStart);
-
             bodySeq = buffer.Slice(bodyStart, bodyEnd);
-
             reader.Advance(contentLength);
         }
 
-        // it is safer to copy body to a new array
-        byte[] body = [];
+        byte[] body = Array.Empty<byte>();
         if (hasContentLength && contentLength > 0)
         {
             body = new byte[contentLength];
             bodySeq.CopyTo(body);
         }
 
+        // 5. Method map
         HttpMethodsEnum methodEnum = method switch
         {
             "GET" => HttpMethodsEnum.Get,
@@ -165,7 +164,7 @@ internal class FlashHttpParser
         {
             Method = methodEnum,
             Path = path,
-            Headers = headers,
+            Headers = materializeHeadersList ? rawHeaders.Materialize() : EmptyHeadersList,
             ContentLength = contentLength,
             ContentType = contentType,
             IsHttps = isHttps,
@@ -177,8 +176,9 @@ internal class FlashHttpParser
             Body = body
         };
 
-        buffer = buffer.Slice(reader.Position);
+        request.SetRawHeaders(rawHeaders);
 
+        buffer = buffer.Slice(reader.Position);
         return true;
     }
 
@@ -189,19 +189,35 @@ internal class FlashHttpParser
             line = default;
             return false;
         }
-
         return true;
     }
 
+    private static ReadOnlySpan<byte> TrimAsciiWhitespace(ReadOnlySpan<byte> span)
+    {
+        int start = 0;
+        int end = span.Length - 1;
+
+        while (start <= end && IsSpace(span[start])) start++;
+        while (end >= start && IsSpace(span[end])) end--;
+
+        if (start > end)
+            return ReadOnlySpan<byte>.Empty;
+
+        return span.Slice(start, end - start + 1);
+    }
+
+    private static bool IsSpace(byte b)
+        => b == (byte)' ' || b == (byte)'\t';
+
     private static bool TryParseRequestLine(
-    in ReadOnlySequence<byte> lineSeq,
-    out string method,
-    out string path,
-    out string version)
+        in ReadOnlySequence<byte> lineSeq,
+        out string method,
+        out string path,
+        out string version)
     {
         if (lineSeq.Length == 0)
         {
-            method = path = version = "";
+            method = path = version = string.Empty;
             return false;
         }
 
@@ -214,22 +230,19 @@ internal class FlashHttpParser
         lineSeq.CopyTo(line);
 
         if (line.Length > 0 && line[^1] == CR)
-        {
             line = line[..^1];
-        }
 
-        // METHOD SP PATH SP VERSION
         int firstSpace = line.IndexOf((byte)' ');
         if (firstSpace <= 0)
         {
-            method = path = version = "";
+            method = path = version = string.Empty;
             return false;
         }
 
         int secondSpace = line.Slice(firstSpace + 1).IndexOf((byte)' ');
         if (secondSpace < 0)
         {
-            method = path = version = "";
+            method = path = version = string.Empty;
             return false;
         }
 
@@ -246,75 +259,20 @@ internal class FlashHttpParser
         return true;
     }
 
-
-    private static bool TryParseHeaderLine(
-        in ReadOnlySequence<byte> lineSeq,
-        out string? name,
-        out string? value)
+    private static bool AsciiEqualsIgnoreCase(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b)
     {
-        if (lineSeq.Length == 0)
+        if (a.Length != b.Length) return false;
+
+        for (int i = 0; i < a.Length; i++)
         {
-            name = value = null;
-            return false;
+            byte ca = a[i];
+            byte cb = b[i];
+
+            if ((uint)(ca - (byte)'A') <= (uint)('Z' - 'A')) ca = (byte)(ca + 32);
+            if ((uint)(cb - (byte)'A') <= (uint)('Z' - 'A')) cb = (byte)(cb + 32);
+
+            if (ca != cb) return false;
         }
-
-        int len = checked((int)lineSeq.Length);
-
-        Span<byte> line = len <= StackAllocThreshold
-            ? stackalloc byte[len]
-            : new byte[len];
-
-        lineSeq.CopyTo(line);
-
-        // Bỏ CR nếu có
-        if (line.Length > 0 && line[^1] == CR)
-        {
-            line = line[..^1];
-        }
-
-        if (line.Length == 0)
-        {
-            name = value = null;
-            return false;
-        }
-
-        int colonIndex = line.IndexOf((byte)':');
-        if (colonIndex <= 0)
-        {
-            name = value = null;
-            return false;
-        }
-
-        var nameSpan = TrimAsciiWhitespace(line[..colonIndex]);
-        var valueSpan = TrimAsciiWhitespace(line[(colonIndex + 1)..]);
-
-        if (nameSpan.Length == 0)
-        {
-            name = value = null;
-            return false;
-        }
-
-        name = Encoding.ASCII.GetString(nameSpan);
-        value = Encoding.ASCII.GetString(valueSpan);
         return true;
     }
-
-
-    private static ReadOnlySpan<byte> TrimAsciiWhitespace(ReadOnlySpan<byte> span)
-    {
-        int start = 0;
-        int end = span.Length - 1;
-
-        while (start <= end && IsSpace(span[start])) start++;
-        while (end >= start && IsSpace(span[end])) end--;
-
-        if (start > end)
-            return [];
-
-        return span.Slice(start, end - start + 1);
-    }
-
-    private static bool IsSpace(byte b)
-        => b == (byte)' ' || b == (byte)'\t';
-
 }
