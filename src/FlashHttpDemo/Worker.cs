@@ -1,6 +1,5 @@
-﻿using FlashHttp.Server;
-using System;
-using System.Collections.Generic;
+﻿using FlashHttp.Abstractions;
+using FlashHttp.Server;
 using System.Text;
 
 namespace FlashHttpDemo;
@@ -9,16 +8,16 @@ public sealed class Worker(FlashHttpServerOptions options, ILogger<Worker> logge
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var handlerSet = new HandlerSet();
-        handlerSet.OnGetHandlers.Add("/", async (request, response, cancellationToken) =>
+        var server = new FlashHttpServer(options, null);
+        server.WithHandler(HttpMethodsEnum.Get, "/", async (request, response, cancellationToken) =>
         {
             response.StatusCode = 200;
-            response.Headers.Add(new FlashHttp.Abstractions.HttpHeader("Content-Type", "text/plain; charset=utf-8"));
+            response.Headers.Add(new HttpHeader("Content-Type", "text/plain; charset=utf-8"));
             response.Body = Encoding.UTF8.GetBytes("Hello, FlashHttp!");
         });
 
-        var server = new FlashHttpSaeaServer(options, handlerSet, null);
+        logger.LogInformation("Starting FlashHttp server...");
 
-        server.Start();
+        await server.StartAsync(stoppingToken);
     }
 }

@@ -11,14 +11,6 @@ namespace FlashHttp.Server;
 /// Central registry for HTTP route handlers.
 /// Supports both synchronous and asynchronous handlers while remaining
 /// backwards compatible with the original sync-only design.
-///
-/// - Sync handlers: Action<FlashHttpRequest, FlashHttpResponse>
-/// - Async handlers: FlashRequestAsyncDelegate (ValueTask-based)
-///
-/// Resolution order per request:
-///   1. Async handler for (method, path) if registered
-///   2. Sync handler for (method, path) if registered
-///   3. Fallback 404 response
 /// </summary>
 public sealed class HandlerSet
 {

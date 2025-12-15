@@ -103,8 +103,9 @@ internal class FlashHttpConnection
             ReadResult result = await reader.ReadAsync(cancellationToken);
             ReadOnlySequence<byte> buffer = result.Buffer;
 
-            while (FlashHttpParser.TryReadHttpRequest(ref buffer,                
-                out var request, out bool keepAlive, isHttps, tcpClient.Client.RemoteEndPoint as IPEndPoint, tcpClient.Client.LocalEndPoint as IPEndPoint))
+            while (FlashHttpParser.TryReadHttpRequest(ref buffer,
+                isHttps, tcpClient.Client.RemoteEndPoint as IPEndPoint, tcpClient.Client.LocalEndPoint as IPEndPoint,
+                out var request, out bool keepAlive))
             {
                 if (logger.IsEnabled(LogLevel.Information))
                 {
