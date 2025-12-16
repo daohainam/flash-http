@@ -1,6 +1,8 @@
 ﻿using FlashHttp.Abstractions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.IO;
+using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -68,7 +70,7 @@ public class FlashHttpServer: IDisposable
             _logger.LogInformation("Starting listening on {address}:{port}", _options.Address, _options.Port);
         }
 
-        listener = new TcpListener(_options.Address, _options.Port);
+        listener = CreateListener(_options.Address, _options.Port);
         listener.Start(1024);
 
         while (!cancellationToken.IsCancellationRequested)
@@ -76,8 +78,9 @@ public class FlashHttpServer: IDisposable
             try
             {
                 TcpClient client = await listener.AcceptTcpClientAsync(cancellationToken);
+                client.NoDelay = true;
 
-                _ = Task.Run(() => HandleNewClientConnectionAsync(client, cancellationToken), cancellationToken);
+                _ = HandleNewClientConnectionAsync(client, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -105,9 +108,10 @@ public class FlashHttpServer: IDisposable
         if (_logger.IsEnabled(LogLevel.Information))
             _logger.LogInformation("Accepted new client connection from {remoteEndPoint}", tcpClient.Client.RemoteEndPoint);
 
+        Stream? stream = null;
         try
         {
-            Stream stream = tcpClient.GetStream();
+            stream = tcpClient.GetStream();
             bool isHttps = false;
             if (_options.Certificate != null)
             {
@@ -133,6 +137,10 @@ public class FlashHttpServer: IDisposable
             var connection = new FlashHttpConnection(tcpClient, stream, isHttps, handlerSet, _logger);
             await connection.ProcessRequestsAsync(cancellationToken);
         }
+        catch (OperationCanceledException)
+        {
+            // normal shutdown
+        }
         catch (AuthenticationException ex)
         {
             _logger.LogError(ex, "Error accepting client");
@@ -141,6 +149,28 @@ public class FlashHttpServer: IDisposable
         {
             _logger.LogError(ex, "Error accepting client");
         }
+        finally
+        {
+            try { if (stream != null) await stream.DisposeAsync().ConfigureAwait(false); } catch { }
+            try { tcpClient.Close(); } catch { }
+            tcpClient.Dispose();
+        }
+    }
+
+    private static TcpListener CreateListener(IPAddress address, int port)
+    {
+        // Default Address.Any is IPv4-only (0.0.0.0). Many clients (and tools like bombardier)
+        // resolve localhost to IPv6 (::1) first, which would get "connection refused".
+        // If user didn't specify an explicit address, listen on IPv6Any with DualMode,
+        // so we accept both IPv4 and IPv6 connections.
+        if (address.Equals(IPAddress.Any))
+        {
+            var l = new TcpListener(IPAddress.IPv6Any, port);
+            try { l.Server.DualMode = true; } catch { /* ignore if not supported */ }
+            return l;
+        }
+
+        return new TcpListener(address, port);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)

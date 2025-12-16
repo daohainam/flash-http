@@ -38,13 +38,23 @@ internal class FlashHttpConnection
         var inputPipe = new Pipe();
         var outputWriter = PipeWriter.Create(stream);
 
+        using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var token = connectionCts.Token;
+
         // Read from stream and fill pipe
-        var reading = FillPipeAsync(stream, inputPipe.Writer, cancellationToken);
+        var reading = FillPipeAsync(stream, inputPipe.Writer, token);
 
         // Read from pipe and process requests
-        var readingRequests = ReadPipeAsync(inputPipe.Reader, outputWriter, cancellationToken);
+        var processing = ReadPipeAsync(inputPipe.Reader, outputWriter, connectionCts, token);
 
-        await Task.WhenAll(reading, readingRequests);
+        // Wait for processing to finish, then cancel the reader task if still blocked in ReadAsync.
+        await processing.ConfigureAwait(false);
+        connectionCts.Cancel();
+
+        try { await reading.ConfigureAwait(false); }
+        catch (OperationCanceledException) { /* expected on connection close */ }
+
+        await outputWriter.CompleteAsync().ConfigureAwait(false);
     }
 
     private static async Task FillPipeAsync(Stream stream, PipeWriter writer, CancellationToken cancellationToken)
@@ -74,7 +84,7 @@ internal class FlashHttpConnection
         await writer.CompleteAsync();
     }
 
-    private async Task ReadPipeAsync(PipeReader reader, PipeWriter writer, CancellationToken cancellationToken)
+    private async Task ReadPipeAsync(PipeReader reader, PipeWriter writer, CancellationTokenSource connectionCts, CancellationToken cancellationToken)
     {
         bool connectionClose = false;
 
@@ -124,6 +134,7 @@ internal class FlashHttpConnection
                 if (!keepAlive)
                 {
                     connectionClose = true;
+                    connectionCts.Cancel();
                     break;
                 }
             }
