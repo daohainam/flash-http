@@ -59,7 +59,7 @@ internal static class FlashHttpParser
             if (!TryReadLine(ref reader, out ReadOnlySequence<byte> headerLineSeq))
                 return false;
 
-            if (headerLineSeq.Length == 0)
+            if (headerLineSeq.Length == 0 || (headerLineSeq.Length == 1 && headerLineSeq.FirstSpan[0] == CR))
                 break;
 
             int len = checked((int)headerLineSeq.Length);
