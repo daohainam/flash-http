@@ -1,29 +1,46 @@
 ﻿using FlashHttp.Abstractions;
-using Microsoft.Extensions.Logging;
-using System;
+using Microsoft.Extensions.ObjectPool;
 using System.Buffers;
-using System.Collections.Generic;
-using System.IO.Pipelines;
 using System.Net;
-using System.Net.Sockets;
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace FlashHttp.Server;
 
 internal class FlashHttpParser
 {
+    public enum TryReadHttpRequestResults
+    {
+        Incomplete,
+        Success,
+        RequestLineTooLong,
+        HeaderLineTooLong,
+        UnsupportedHttpVersion,
+        InvalidRequest
+    }
+
+    private static ReadOnlySpan<byte> Http11Bytes => "HTTP/1.1"u8;
+
+    private static ReadOnlySpan<byte> GetBytes => "GET"u8;
+    private static ReadOnlySpan<byte> PostBytes => "POST"u8;
+    private static ReadOnlySpan<byte> PutBytes => "PUT"u8;
+    private static ReadOnlySpan<byte> DeleteBytes => "DELETE"u8;
+    private static ReadOnlySpan<byte> OptionsBytes => "OPTIONS"u8;
+    private static ReadOnlySpan<byte> PatchBytes => "PATCH"u8;
+    private static ReadOnlySpan<byte> HeadBytes => "HEAD"u8;
+
     private static readonly byte CR = (byte)'\r';
     private static readonly byte LF = (byte)'\n';
     private const int StackAllocThreshold = 128;
+    private const int MaxRequestLineSize = 8192;
 
-    public static bool TryReadHttpRequest(
+    public static TryReadHttpRequestResults TryReadHttpRequest(
         ref ReadOnlySequence<byte> buffer,
+        out FlashHttpRequest request,
+        out bool keepAlive,
         bool isHttps,
         IPEndPoint? remoteEndPoint,
         IPEndPoint? localEndPoint,
-        out FlashHttpRequest request,
-        out bool keepAlive)
+        ObjectPool<FlashHttpRequest>? requestPool)
     {
         request = default!;
         keepAlive = true;
@@ -32,19 +49,16 @@ internal class FlashHttpParser
 
         // 1. Request line
         if (!TryReadLine(ref reader, out ReadOnlySequence<byte> requestLineSeq))
-        {
-            return false;
-        }
+            return TryReadHttpRequestResults.Incomplete;
 
-        if (!TryParseRequestLine(requestLineSeq, out string method, out string path, out string version))
-        {
-            throw new InvalidOperationException("Invalid HTTP request line");
-        }
+        if (requestLineSeq.Length > MaxRequestLineSize)
+            return TryReadHttpRequestResults.RequestLineTooLong;
 
-        if (version != "HTTP/1.1")
-        {
-            throw new InvalidOperationException("Unsupported HTTP version");
-        }
+        if (!TryParseRequestLine(requestLineSeq, out var method, out string path, out var version))
+            return TryReadHttpRequestResults.InvalidRequest;
+
+        if (version != HttpVersions.Http11)
+            return TryReadHttpRequestResults.UnsupportedHttpVersion;
 
         // 2. Headers
         var headers = new List<HttpHeader>(16);
@@ -57,14 +71,13 @@ internal class FlashHttpParser
         while (true)
         {
             if (!TryReadLine(ref reader, out ReadOnlySequence<byte> headerLineSeq))
-            {
-                return false;
-            }
+                return TryReadHttpRequestResults.Incomplete;
 
-            if (headerLineSeq.Length == 0)
-            {
+            if (headerLineSeq.Length > MaxRequestLineSize)
+                return TryReadHttpRequestResults.HeaderLineTooLong;
+
+            if (headerLineSeq.Length == 0 || (headerLineSeq.Length == 1 && headerLineSeq.FirstSpan[0] == CR))
                 break;
-            }
 
             // Allocate a buffer on the heap if headerLineSeq.Length > 0
             byte[]? tmp = null;
@@ -119,9 +132,7 @@ internal class FlashHttpParser
         if (hasContentLength && contentLength > 0)
         {
             if (reader.Remaining < contentLength)
-            {
-                return false;
-            }
+                return TryReadHttpRequestResults.Incomplete;
 
             var bodyStart = reader.Position;
             var bodyEnd = buffer.GetPosition(contentLength, bodyStart);
@@ -139,37 +150,27 @@ internal class FlashHttpParser
             bodySeq.CopyTo(body);
         }
 
-        HttpMethodsEnum methodEnum = method switch
-        {
-            "GET" => HttpMethodsEnum.Get,
-            "POST" => HttpMethodsEnum.Post,
-            "PUT" => HttpMethodsEnum.Put,
-            "DELETE" => HttpMethodsEnum.Delete,
-            "HEAD" => HttpMethodsEnum.Head,
-            "PATCH" => HttpMethodsEnum.Patch,
-            "OPTIONS" => HttpMethodsEnum.Options,
-            _ => throw new InvalidOperationException($"Unsupported HTTP method: {method}")
-        };
+        request = requestPool?.Get() ?? new FlashHttpRequest();
+        if (request == null)
+            throw new InvalidOperationException("Failed to get FlashHttpRequest from pool.");
 
-        request = new FlashHttpRequest
-        {
-            Method = methodEnum,
-            Path = path,
-            Headers = headers,
-            ContentLength = contentLength,
-            ContentType = contentType,
-            IsHttps = isHttps,
-            KeepAliveRequested = keepAlive,
-            RemoteAddress = remoteEndPoint?.Address,
-            RemotePort = remoteEndPoint?.Port ?? 0,
-            HttpVersion = HttpVersions.Http11,
-            Port = localEndPoint?.Port ?? 0,
-            Body = body
-        };
+        request.Method = method;
+        request.Path = path;
+        request.Headers = headers;
+        request.ContentLength = contentLength;
+        request.ContentType = contentType;
+        request.IsHttps = isHttps;
+        request.KeepAliveRequested = keepAlive;
+        request.RemoteAddress = remoteEndPoint?.Address;
+        request.RemotePort = remoteEndPoint?.Port ?? 0;
+        request.HttpVersion = HttpVersions.Http11;
+        request.Port = localEndPoint?.Port ?? 0;
+        request.Body = body;
+
 
         buffer = buffer.Slice(reader.Position);
 
-        return true;
+        return TryReadHttpRequestResults.Success;
     }
 
     private static bool TryReadLine(ref SequenceReader<byte> reader, out ReadOnlySequence<byte> line)
@@ -185,13 +186,15 @@ internal class FlashHttpParser
 
     private static bool TryParseRequestLine(
     in ReadOnlySequence<byte> lineSeq,
-    out string method,
+    out HttpMethodsEnum method,
     out string path,
-    out string version)
+    out HttpVersions version)
     {
         if (lineSeq.Length == 0)
         {
-            method = path = version = "";
+            method = HttpMethodsEnum.Get;
+            path = "";
+            version = HttpVersions.Unknown;
             return false;
         }
 
@@ -212,14 +215,18 @@ internal class FlashHttpParser
         int firstSpace = line.IndexOf((byte)' ');
         if (firstSpace <= 0)
         {
-            method = path = version = "";
+            method = HttpMethodsEnum.Get;
+            path = "";
+            version = HttpVersions.Unknown;
             return false;
         }
 
         int secondSpace = line.Slice(firstSpace + 1).IndexOf((byte)' ');
         if (secondSpace < 0)
         {
-            method = path = version = "";
+            method = HttpMethodsEnum.Get;
+            path = "";
+            version = HttpVersions.Unknown;
             return false;
         }
 
@@ -229,9 +236,30 @@ internal class FlashHttpParser
         ReadOnlySpan<byte> pathSpan = line.Slice(firstSpace + 1, secondSpace - firstSpace - 1);
         ReadOnlySpan<byte> versionSpan = line[(secondSpace + 1)..];
 
-        method = Encoding.ASCII.GetString(methodSpan);
+        if (methodSpan.SequenceEqual(GetBytes))
+            method = HttpMethodsEnum.Get;
+        else if (methodSpan.SequenceEqual(PostBytes))
+            method = HttpMethodsEnum.Post;
+        else if (methodSpan.SequenceEqual(PutBytes))
+            method = HttpMethodsEnum.Put;
+        else if (methodSpan.SequenceEqual(DeleteBytes))
+            method = HttpMethodsEnum.Delete;
+        else if (methodSpan.SequenceEqual(OptionsBytes))
+            method = HttpMethodsEnum.Options;
+        else if (methodSpan.SequenceEqual(PatchBytes))
+            method = HttpMethodsEnum.Patch;
+        else if (methodSpan.SequenceEqual(HeadBytes))
+            method = HttpMethodsEnum.Head;
+        else
+        {
+            method = HttpMethodsEnum.Get; // default
+            path = "";
+            version = HttpVersions.Unknown;
+            return false;
+        }
+
         path = Encoding.ASCII.GetString(pathSpan);
-        version = Encoding.ASCII.GetString(versionSpan);
+        version = versionSpan.SequenceEqual(Http11Bytes) ? HttpVersions.Http11 : HttpVersions.Unknown;
 
         return true;
     }

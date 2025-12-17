@@ -1,8 +1,11 @@
 ﻿using FlashHttp.Abstractions;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.ObjectPool;
 using System.Buffers;
+using System.IO;
 using System.IO.Pipelines;
 using System.Net;
+using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Text;
@@ -17,14 +20,18 @@ internal class FlashHttpConnection
     private readonly Stream stream;
     private readonly bool isHttps;
     private readonly HandlerSet handlerSet;
+    private readonly ObjectPool<FlashHttpRequest> _requestPool;
+    private readonly ObjectPool<FlashHttpResponse> _responsePool;
     private readonly ILogger logger;
 
-    public FlashHttpConnection(TcpClient tcpClient, Stream stream, bool isHttps, HandlerSet handlerSet, ILogger logger)
+    public FlashHttpConnection(TcpClient tcpClient, Stream stream, bool isHttps, HandlerSet handlerSet, ObjectPool<FlashHttpRequest> requestPool, ObjectPool<FlashHttpResponse> responsePool, ILogger logger)
     {
         this.tcpClient = tcpClient;
         this.stream = stream;
         this.isHttps = isHttps;
         this.handlerSet = handlerSet;
+        this._requestPool = requestPool;
+        this._responsePool = responsePool;
         this.logger = logger;
     }
 
@@ -36,35 +43,26 @@ internal class FlashHttpConnection
 
     internal async Task ProcessRequestsAsync(CancellationToken cancellationToken)
     {
-        try
-        {
-            var inputPipe = new Pipe();
-            var outputWriter = PipeWriter.Create(stream);
+        var inputPipe = new Pipe();
+        var outputWriter = PipeWriter.Create(stream);
 
-            var reading = FillPipeAsync(stream, inputPipe.Writer, cancellationToken);
-            var readingRequests = ReadPipeAsync(inputPipe.Reader, outputWriter, cancellationToken);
+        using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var token = connectionCts.Token;
 
-            await Task.WhenAll(reading, readingRequests);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Unhandled exception in connection");
-        }
-        finally
-        {
-            try
-            {
-                await stream.DisposeAsync();
-            }
-            catch { }
+        // Read from stream and fill pipe
+        var reading = FillPipeAsync(stream, inputPipe.Writer, token);
 
-            try
-            {
-                tcpClient.Close();
-                tcpClient.Dispose();
-            }
-            catch { }
-        }
+        // Read from pipe and process requests
+        var processing = ReadPipeAsync(inputPipe.Reader, outputWriter, connectionCts, token);
+
+        // Wait for processing to finish, then cancel the reader task if still blocked in ReadAsync.
+        await processing.ConfigureAwait(false);
+        connectionCts.Cancel();
+
+        try { await reading.ConfigureAwait(false); }
+        catch (OperationCanceledException) { /* expected on connection close */ }
+
+        await outputWriter.CompleteAsync().ConfigureAwait(false);
     }
 
     private static async Task FillPipeAsync(Stream stream, PipeWriter writer, CancellationToken cancellationToken)
@@ -94,7 +92,7 @@ internal class FlashHttpConnection
         await writer.CompleteAsync();
     }
 
-    internal async Task ReadPipeAsync(PipeReader reader, PipeWriter writer, CancellationToken cancellationToken)
+    private async Task ReadPipeAsync(PipeReader reader, PipeWriter writer, CancellationTokenSource connectionCts, CancellationToken cancellationToken)
     {
         bool connectionClose = false;
 
@@ -103,35 +101,66 @@ internal class FlashHttpConnection
             ReadResult result = await reader.ReadAsync(cancellationToken);
             ReadOnlySequence<byte> buffer = result.Buffer;
 
-            while (FlashHttpParser.TryReadHttpRequest(ref buffer,
-                isHttps, tcpClient.Client.RemoteEndPoint as IPEndPoint, tcpClient.Client.LocalEndPoint as IPEndPoint,
-                out var request, out bool keepAlive))
+            while (true)
             {
-                if (logger.IsEnabled(LogLevel.Information))
+                if (buffer.Length == 0)
                 {
-                    logger.LogInformation("Received HTTP request: {Method} {Path}", request.Method, request.Path);
+                    break;
                 }
 
-                var response = new FlashHttpResponse();
+                var readResult = FlashHttpParser.TryReadHttpRequest(
+                        ref buffer,
+                        out var request,
+                        out bool keepAlive,
+                        isHttps: isHttps,
+                        remoteEndPoint: tcpClient.Client.RemoteEndPoint as IPEndPoint,
+                        localEndPoint: tcpClient.Client.LocalEndPoint as IPEndPoint,
+                        _requestPool
+                        );
 
-                await handlerSet.HandleAsync(request, response, cancellationToken);
+                if (readResult == FlashHttpParser.TryReadHttpRequestResults.Incomplete)
+                {
+                    break; // need more data
+                }
 
-                await WriteHttpResponseAsync(writer, response, keepAlive, cancellationToken);
+                if (readResult == FlashHttpParser.TryReadHttpRequestResults.Success)
+                {
+                    if (logger.IsEnabled(LogLevel.Information))
+                    {
+                        logger.LogInformation("Received HTTP request: {Method} {Path}", request.Method, request.Path);
+                    }
+
+                    var response = _responsePool.Get();
+
+                    try
+                    {
+                        await handlerSet.HandleAsync(request, response, cancellationToken);
+
+                        _requestPool.Return(request);
+                        request = null;
+
+                        await WriteHttpResponseAsync(writer, response, keepAlive, cancellationToken);
+                    }
+                    finally
+                    {
+                        if (request != null)
+                        {
+                            _requestPool.Return(request);
+                        }
+                        _responsePool.Return(response);
+                    }
+                }
+                else
+                {
+                    keepAlive = false;
+                }
 
                 if (!keepAlive)
                 {
                     connectionClose = true;
+                    connectionCts.Cancel();
                     break;
                 }
-            }
-
-            if (cancellationToken.IsCancellationRequested)
-            {
-                if (logger.IsEnabled(LogLevel.Warning))
-                {
-                    logger.LogWarning("Connection timed out while reading HTTP request.");
-                }
-                break;
             }
 
             reader.AdvanceTo(buffer.Start, buffer.End);

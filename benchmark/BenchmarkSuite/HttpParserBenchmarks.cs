@@ -40,11 +40,12 @@ namespace BenchmarkSuite
             var buffer = _buffer; // IMPORTANT: copy, vì TryReadHttpRequest sẽ Slice()
             FlashHttpParser.TryReadHttpRequest(
                 ref buffer,
+                out var request,
+                out var keepAlive,  
                 false,
                 _remote,
                 _local, 
-                out var req,
-                out var keepAlive);
+                null);
         }
     }
 }

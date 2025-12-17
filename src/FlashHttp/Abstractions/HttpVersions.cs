@@ -6,5 +6,5 @@ namespace FlashHttp.Abstractions;
 public enum HttpVersions
 {
     Http11,
-    Http2
+    Unknown
 }
