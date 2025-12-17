@@ -84,13 +84,13 @@ public sealed class FlashHttpHeaders
         if (_raw.Length != 0)
         {
             ArrayPool<byte>.Shared.Return(_raw);
-            _raw = Array.Empty<byte>();
+            _raw = [];
         }
 
         if (_slices.Length != 0)
         {
             ArrayPool<HeaderSlice>.Shared.Return(_slices);
-            _slices = Array.Empty<HeaderSlice>();
+            _slices = [];
         }
 
         _valueStringCache = null;

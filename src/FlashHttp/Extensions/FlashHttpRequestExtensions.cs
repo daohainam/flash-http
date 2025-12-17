@@ -7,17 +7,17 @@ namespace FlashHttp.Extensions;
 
 public static class FlashHttpRequestExtensions
 {
-    public static string GetHeaderValue(this FlashHttpRequest request, string headerName)
-    {
-        foreach (var header in request.Headers)
-        {
-            if (string.Equals(header.Name, headerName, StringComparison.OrdinalIgnoreCase))
-            {
-                return header.Value;
-            }
-        }
-        return string.Empty;
-    }
+    //public static string GetHeaderValue(this FlashHttpRequest request, string headerName)
+    //{
+    //    foreach (var header in request.Headers)
+    //    {
+    //        if (string.Equals(header.Name, headerName, StringComparison.OrdinalIgnoreCase))
+    //        {
+    //            return header.Value;
+    //        }
+    //    }
+    //    return string.Empty;
+    //}
 
     public static string GetBodyAsString(this FlashHttpRequest request, Encoding? encoding = null)
     {

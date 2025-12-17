@@ -96,42 +96,42 @@ internal class FlashHttpConnection
             while (true)
             {
                 var localBuffer = buffer;
-
-                if (!FlashHttpParser.TryReadHttpRequest(
+                var readResult = FlashHttpParser.TryReadHttpRequest(
                         ref localBuffer,
                         out var request,
                         out bool keepAlive,
                         isHttps: isHttps,
                         remoteEndPoint: tcpClient.Client.RemoteEndPoint as IPEndPoint,
-                        localEndPoint: tcpClient.Client.LocalEndPoint as IPEndPoint,
-                        materializeHeadersList: false))
+                        localEndPoint: tcpClient.Client.LocalEndPoint as IPEndPoint);
+
+                if (readResult == FlashHttpParser.TryReadHttpRequestResults.Incomplete)
                 {
                     break; // need more data
                 }
 
-                // consumed
-                buffer = localBuffer;
-
-                if (logger.IsEnabled(LogLevel.Information))
+                if (readResult == FlashHttpParser.TryReadHttpRequestResults.Success)
                 {
-                    logger.LogInformation("Received HTTP request: {Method} {Path}", request.Method, request.Path);
-                }
+                    buffer = localBuffer;
 
-                var response = new FlashHttpResponse();
+                    if (logger.IsEnabled(LogLevel.Information))
+                    {
+                        logger.LogInformation("Received HTTP request: {Method} {Path}", request.Method, request.Path);
+                    }
 
-                try
-                {
+                    var response = new FlashHttpResponse();
+
                     await handlerSet.HandleAsync(request, response, cancellationToken);
-                }
-                finally
-                {
-                    // IMPORTANT: release pooled header storage
-                    request.ReleaseRawHeaders();
-                }
 
-                await WriteHttpResponseAsync(writer, response, keepAlive, cancellationToken);
+                    await WriteHttpResponseAsync(writer, response, keepAlive, cancellationToken);
 
-                if (!keepAlive)
+                    if (!keepAlive)
+                    {
+                        connectionClose = true;
+                        connectionCts.Cancel();
+                        break;
+                    }
+                }
+                else
                 {
                     connectionClose = true;
                     connectionCts.Cancel();

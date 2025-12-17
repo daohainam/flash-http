@@ -17,8 +17,8 @@ public class FlashHttpRequest
     public IPAddress? RemoteAddress { get; init; } = null;
     public int RemotePort { get; init; } = 0;
     public HttpVersions HttpVersion { get; init; } = HttpVersions.Http11;
-    public List<HttpHeader> Headers { get; set; } = new();
-    public byte[] Body { get; init; } = [];
+    public FlashHttpHeaders Headers { get; set; } = default!;
+    public byte[] Body { get; init; } = default!;
 }
 
 

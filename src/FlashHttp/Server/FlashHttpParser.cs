@@ -11,43 +11,54 @@ internal static class FlashHttpParser
 {
     private static readonly byte CR = (byte)'\r';
     private static readonly byte LF = (byte)'\n';
-    private const int StackAllocThreshold = 256;
+    private const int MaxRequestLineSize = 8192;
 
     // Common header names (ASCII)
+    private static ReadOnlySpan<byte> Http11 => "HTTP/1.1\r"u8;
     private static ReadOnlySpan<byte> HostName => "Host"u8;
     private static ReadOnlySpan<byte> AuthorizationName => "Authorization"u8;
     private static ReadOnlySpan<byte> ContentLengthName => "Content-Length"u8;
     private static ReadOnlySpan<byte> ConnectionName => "Connection"u8;
     private static ReadOnlySpan<byte> ContentTypeName => "Content-Type"u8;
 
-    private static readonly List<HttpHeader> EmptyHeadersList = new(0);
+    public enum TryReadHttpRequestResults {
+        Incomplete,
+        Success,
+        RequestLineTooLong,
+        HeaderLineTooLong,
+        UnsupportedHttpVersion,
+        InvalidRequest
+    }
 
-    public static bool TryReadHttpRequest(
+    public static TryReadHttpRequestResults TryReadHttpRequest(
         ref ReadOnlySequence<byte> buffer,
         out FlashHttpRequest request,
         out bool keepAlive,
         bool isHttps,
         IPEndPoint? remoteEndPoint,
-        IPEndPoint? localEndPoint,
-        bool materializeHeadersList)
+        IPEndPoint? localEndPoint)
     {
         request = default!;
         keepAlive = true;
 
         var reader = new SequenceReader<byte>(buffer);
+        Span<byte> line = stackalloc byte[MaxRequestLineSize];
 
         // 1. Request line
         if (!TryReadLine(ref reader, out ReadOnlySequence<byte> requestLineSeq))
-            return false;
+            return TryReadHttpRequestResults.Incomplete;
 
-        if (!TryParseRequestLine(requestLineSeq, out string method, out string path, out string version))
-            throw new InvalidOperationException("Invalid HTTP request line");
+        // to do: we should return a result code instead of throwing here
+        if (requestLineSeq.Length > MaxRequestLineSize)
+            return TryReadHttpRequestResults.RequestLineTooLong;
 
-        if (!string.Equals(version, "HTTP/1.1", StringComparison.Ordinal))
-            throw new InvalidOperationException("Unsupported HTTP version");
+        if (!TryParseRequestLine(requestLineSeq, line, out string method, out string path, out var version))
+            return TryReadHttpRequestResults.InvalidRequest;
 
-        // 2. Headers (raw)
-        var rawHeaders = FlashHttpHeadersPool.Rent();
+        if (version != HttpVersions.Http11)
+            return TryReadHttpRequestResults.UnsupportedHttpVersion;
+
+        var headers = new FlashHttpHeaders();
 
         int contentLength = 0;
         bool hasContentLength = false;
@@ -57,13 +68,15 @@ internal static class FlashHttpParser
         while (true)
         {
             if (!TryReadLine(ref reader, out ReadOnlySequence<byte> headerLineSeq))
-                return false;
+                return TryReadHttpRequestResults.Incomplete;
+
+            if (headerLineSeq.Length > MaxRequestLineSize)
+                throw new InvalidOperationException("Header line too long");
 
             if (headerLineSeq.Length == 0 || (headerLineSeq.Length == 1 && headerLineSeq.FirstSpan[0] == CR))
                 break;
 
             int len = checked((int)headerLineSeq.Length);
-            Span<byte> line = len <= StackAllocThreshold ? stackalloc byte[len] : new byte[len];
             headerLineSeq.CopyTo(line);
 
             if (line.Length > 0 && line[^1] == CR)
@@ -82,19 +95,19 @@ internal static class FlashHttpParser
             if (name.Length == 0)
                 continue;
 
-            int idx = rawHeaders.Add(name, value);
+            int idx = headers.Add(name, value);
 
             // Record known header indices (first occurrence wins)
             if (AsciiEqualsIgnoreCase(name, HostName))
-                rawHeaders.SetKnownIndex(KnownHeader.Host, idx);
+                headers.SetKnownIndex(KnownHeader.Host, idx);
             else if (AsciiEqualsIgnoreCase(name, AuthorizationName))
-                rawHeaders.SetKnownIndex(KnownHeader.Authorization, idx);
+                headers.SetKnownIndex(KnownHeader.Authorization, idx);
             else if (AsciiEqualsIgnoreCase(name, ContentTypeName))
-                rawHeaders.SetKnownIndex(KnownHeader.ContentType, idx);
+                headers.SetKnownIndex(KnownHeader.ContentType, idx);
             else if (AsciiEqualsIgnoreCase(name, ConnectionName))
-                rawHeaders.SetKnownIndex(KnownHeader.Connection, idx);
+                headers.SetKnownIndex(KnownHeader.Connection, idx);
             else if (AsciiEqualsIgnoreCase(name, ContentLengthName))
-                rawHeaders.SetKnownIndex(KnownHeader.ContentLength, idx);
+                headers.SetKnownIndex(KnownHeader.ContentLength, idx);
 
             // Parse "hot" headers into request fields
             if (!hasContentLength && AsciiEqualsIgnoreCase(name, ContentLengthName))
@@ -132,7 +145,7 @@ internal static class FlashHttpParser
         if (hasContentLength && contentLength > 0)
         {
             if (reader.Remaining < contentLength)
-                return false;
+                return TryReadHttpRequestResults.Incomplete;
 
             var bodyStart = reader.Position;
             var bodyEnd = buffer.GetPosition(contentLength, bodyStart);
@@ -140,7 +153,7 @@ internal static class FlashHttpParser
             reader.Advance(contentLength);
         }
 
-        byte[] body = Array.Empty<byte>();
+        byte[] body = [];
         if (hasContentLength && contentLength > 0)
         {
             body = new byte[contentLength];
@@ -164,7 +177,7 @@ internal static class FlashHttpParser
         {
             Method = methodEnum,
             Path = path,
-            Headers = materializeHeadersList ? rawHeaders.Materialize() : EmptyHeadersList,
+            Headers = headers,
             ContentLength = contentLength,
             ContentType = contentType,
             IsHttps = isHttps,
@@ -176,10 +189,8 @@ internal static class FlashHttpParser
             Body = body
         };
 
-        request.SetRawHeaders(rawHeaders);
-
         buffer = buffer.Slice(reader.Position);
-        return true;
+        return TryReadHttpRequestResults.Success;
     }
 
     private static bool TryReadLine(ref SequenceReader<byte> reader, out ReadOnlySequence<byte> line)
@@ -211,21 +222,17 @@ internal static class FlashHttpParser
 
     private static bool TryParseRequestLine(
         in ReadOnlySequence<byte> lineSeq,
+        Span<byte> line,
         out string method,
         out string path,
-        out string version)
+        out HttpVersions version)
     {
         if (lineSeq.Length == 0)
         {
-            method = path = version = string.Empty;
+            method = path = string.Empty;
+            version = HttpVersions.Unknown;
             return false;
         }
-
-        int len = checked((int)lineSeq.Length);
-
-        Span<byte> line = len <= StackAllocThreshold
-            ? stackalloc byte[len]
-            : new byte[len];
 
         lineSeq.CopyTo(line);
 
@@ -235,14 +242,16 @@ internal static class FlashHttpParser
         int firstSpace = line.IndexOf((byte)' ');
         if (firstSpace <= 0)
         {
-            method = path = version = string.Empty;
+            method = path = string.Empty;
+            version = HttpVersions.Unknown;
             return false;
         }
 
-        int secondSpace = line.Slice(firstSpace + 1).IndexOf((byte)' ');
+        int secondSpace = line[(firstSpace + 1)..].IndexOf((byte)' ');
         if (secondSpace < 0)
         {
-            method = path = version = string.Empty;
+            method = path = string.Empty;
+            version = HttpVersions.Unknown;
             return false;
         }
 
@@ -250,11 +259,11 @@ internal static class FlashHttpParser
 
         ReadOnlySpan<byte> methodSpan = line[..firstSpace];
         ReadOnlySpan<byte> pathSpan = line.Slice(firstSpace + 1, secondSpace - firstSpace - 1);
-        ReadOnlySpan<byte> versionSpan = line[(secondSpace + 1)..];
+        ReadOnlySpan<byte> versionSpan = line[(secondSpace + 1)..(int)lineSeq.Length];
 
         method = Encoding.ASCII.GetString(methodSpan);
         path = Encoding.ASCII.GetString(pathSpan);
-        version = Encoding.ASCII.GetString(versionSpan);
+        version = versionSpan.SequenceEqual(Http11) ? HttpVersions.Http11 : HttpVersions.Unknown;
 
         return true;
     }
