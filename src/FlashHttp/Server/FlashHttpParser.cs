@@ -212,7 +212,7 @@ internal static class FlashHttpParser
         while (end >= start && IsSpace(span[end])) end--;
 
         if (start > end)
-            return ReadOnlySpan<byte>.Empty;
+            return [];
 
         return span.Slice(start, end - start + 1);
     }

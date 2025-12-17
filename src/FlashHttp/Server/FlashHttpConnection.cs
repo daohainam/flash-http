@@ -157,7 +157,7 @@ internal class FlashHttpConnection
         bool keepAlive,
         CancellationToken ct)
     {
-        var body = response.Body ?? Array.Empty<byte>();
+        var body = response.Body ?? [];
 
         bool hasContentLength = false;
         bool hasConnection = false;
