@@ -1,6 +1,7 @@
 ﻿using FlashHttp.Abstractions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.ObjectPool;
 using System.IO;
 using System.Net;
 using System.Net.Security;
@@ -14,13 +15,24 @@ public class FlashHttpServer: IDisposable
     private readonly FlashHttpServerOptions _options;
     private readonly ILogger _logger;
 
-    private readonly HandlerSet handlerSet = new();
-    private TcpListener? listener;
+    private readonly ObjectPool<FlashHttpRequest> _requestPool;
+    private readonly ObjectPool<FlashHttpResponse> _responsePool;
+
+    private readonly HandlerSet _handlerSet = new();
+    private TcpListener? _listener;
 
     public FlashHttpServer(FlashHttpServerOptions options, ILogger? logger = null)
     {
         _options = options;
         _logger = logger ?? NullLogger<FlashHttpServer>.Instance;
+
+        var poolProvider = new DefaultObjectPoolProvider
+        {
+            MaximumRetained = _options.RequestPoolMaximumRetained
+        };
+        _requestPool = poolProvider.Create(new FlashHttpRequestPooledObjectPolicy());
+        _responsePool = poolProvider.Create(new FlashHttpResponsePooledObjectPolicy());
+
     }
 
     public FlashHttpServer(Action<FlashHttpServerOptions>? configureOptions = null, ILogger? logger = null)
@@ -29,6 +41,13 @@ public class FlashHttpServer: IDisposable
         configureOptions?.Invoke(_options);
 
         _logger = logger ?? NullLogger<FlashHttpServer>.Instance;
+
+        var poolProvider = new DefaultObjectPoolProvider
+        {
+            MaximumRetained = _options.RequestPoolMaximumRetained
+        };
+        _requestPool = poolProvider.Create(new FlashHttpRequestPooledObjectPolicy());
+        _responsePool = poolProvider.Create(new FlashHttpResponsePooledObjectPolicy());
     }
 
     public FlashHttpServer WithHandler(HttpMethodsEnum method, string path, FlashRequestAsyncDelegate handler)
@@ -36,25 +55,25 @@ public class FlashHttpServer: IDisposable
         switch (method)
         {
             case HttpMethodsEnum.Get:
-                handlerSet.OnGetHandlers[path] = handler;
+                _handlerSet.OnGetHandlers[path] = handler;
                 break;
             case HttpMethodsEnum.Post:
-                handlerSet.OnPostHandlers[path] = handler;
+                _handlerSet.OnPostHandlers[path] = handler;
                 break;
             case HttpMethodsEnum.Put:
-                handlerSet.OnPutHandlers[path] = handler;
+                _handlerSet.OnPutHandlers[path] = handler;
                 break;
             case HttpMethodsEnum.Delete:
-                handlerSet.OnDeleteHandlers[path] = handler;
+                _handlerSet.OnDeleteHandlers[path] = handler;
                 break;
             case HttpMethodsEnum.Head:
-                handlerSet.OnHeadHandlers[path] = handler;
+                _handlerSet.OnHeadHandlers[path] = handler;
                 break;
             case HttpMethodsEnum.Patch:
-                handlerSet.OnPatchHandlers[path] = handler;
+                _handlerSet.OnPatchHandlers[path] = handler;
                 break;
             case HttpMethodsEnum.Options:
-                handlerSet.OnOptionsHandlers[path] = handler;
+                _handlerSet.OnOptionsHandlers[path] = handler;
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(method), method, null);
@@ -70,14 +89,14 @@ public class FlashHttpServer: IDisposable
             _logger.LogInformation("Starting listening on {address}:{port}", _options.Address, _options.Port);
         }
 
-        listener = CreateListener(_options.Address, _options.Port);
-        listener.Start(1024);
+        _listener = CreateListener(_options.Address, _options.Port);
+        _listener.Start(1024);
 
         while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
-                TcpClient client = await listener.AcceptTcpClientAsync(cancellationToken);
+                TcpClient client = await _listener.AcceptTcpClientAsync(cancellationToken);
                 client.NoDelay = true;
 
                 _ = HandleNewClientConnectionAsync(client, cancellationToken);
@@ -100,7 +119,7 @@ public class FlashHttpServer: IDisposable
             }
         }
 
-        listener.Stop();
+        _listener.Stop();
     }
 
     private async Task HandleNewClientConnectionAsync(TcpClient tcpClient, CancellationToken cancellationToken)
@@ -134,7 +153,7 @@ public class FlashHttpServer: IDisposable
                 isHttps = true;
             }
 
-            var connection = new FlashHttpConnection(tcpClient, stream, isHttps, handlerSet, _logger);
+            var connection = new FlashHttpConnection(tcpClient, stream, isHttps, _handlerSet, _requestPool, _responsePool, _logger);
             await connection.ProcessRequestsAsync(cancellationToken);
         }
         catch (OperationCanceledException)
@@ -175,8 +194,8 @@ public class FlashHttpServer: IDisposable
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
-        listener?.Stop();
-        listener = null;
+        _listener?.Stop();
+        _listener = null;
     }
 
     public void Dispose()
@@ -189,8 +208,8 @@ public class FlashHttpServer: IDisposable
     {
         if (disposing)
         {
-            listener?.Stop();
-            listener = null;
+            _listener?.Stop();
+            _listener = null;
         }
     }
 }

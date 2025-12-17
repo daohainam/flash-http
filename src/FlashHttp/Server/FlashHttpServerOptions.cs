@@ -10,4 +10,6 @@ public class FlashHttpServerOptions
     public int Port { get; set; } = 80;
     public IPAddress Address { get; set; } = IPAddress.IPv6Loopback;
     public X509Certificate2? Certificate { get; set; }
+
+    public int RequestPoolMaximumRetained { get; set; } = 1024;
 }

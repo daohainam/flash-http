@@ -1,6 +1,7 @@
 ﻿using FlashHttp.Abstractions;
 using FlashHttp.Extensions;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.ObjectPool;
 using System.Buffers;
 using System.IO.Pipelines;
 using System.Net;
@@ -12,37 +13,41 @@ namespace FlashHttp.Server;
 
 internal class FlashHttpConnection
 {
-    private readonly TcpClient tcpClient;
-    private readonly Stream stream;
-    private readonly bool isHttps;
-    private readonly HandlerSet handlerSet;
-    private readonly ILogger logger;
+    private readonly TcpClient _tcpClient;
+    private readonly Stream _stream;
+    private readonly bool _isHttps;
+    private readonly HandlerSet _handlerSet;
+    private readonly ObjectPool<FlashHttpRequest> _requestPool;
+    private readonly ObjectPool<FlashHttpResponse> _responsePool;
+    private readonly ILogger _logger;
 
-    public FlashHttpConnection(TcpClient tcpClient, Stream stream, bool isHttps, HandlerSet handlerSet, ILogger logger)
+    public FlashHttpConnection(TcpClient tcpClient, Stream stream, bool isHttps, HandlerSet handlerSet, ObjectPool<FlashHttpRequest> requestPool, ObjectPool<FlashHttpResponse> responsePool, ILogger logger)
     {
-        this.tcpClient = tcpClient;
-        this.stream = stream;
-        this.isHttps = isHttps;
-        this.handlerSet = handlerSet;
-        this.logger = logger;
+        _tcpClient = tcpClient;
+        _stream = stream;
+        _isHttps = isHttps;
+        _handlerSet = handlerSet;
+        _requestPool = requestPool;
+        _responsePool = responsePool;
+        _logger = logger;
     }
 
     internal async Task Close()
     {
-        stream.Flush();
-        await stream.DisposeAsync();
+        _stream.Flush();
+        await _stream.DisposeAsync();
     }
 
     internal async Task ProcessRequestsAsync(CancellationToken cancellationToken)
     {
         var inputPipe = new Pipe();
-        var outputWriter = PipeWriter.Create(stream);
+        var outputWriter = PipeWriter.Create(_stream);
 
         using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var token = connectionCts.Token;
 
         // Read from stream and fill pipe
-        var reading = FillPipeAsync(stream, inputPipe.Writer, token);
+        var reading = FillPipeAsync(_stream, inputPipe.Writer, token);
 
         // Read from pipe and process requests
         var processing = ReadPipeAsync(inputPipe.Reader, outputWriter, connectionCts, token);
@@ -100,9 +105,11 @@ internal class FlashHttpConnection
                         ref localBuffer,
                         out var request,
                         out bool keepAlive,
-                        isHttps: isHttps,
-                        remoteEndPoint: tcpClient.Client.RemoteEndPoint as IPEndPoint,
-                        localEndPoint: tcpClient.Client.LocalEndPoint as IPEndPoint);
+                        isHttps: _isHttps,
+                        remoteEndPoint: _tcpClient.Client.RemoteEndPoint as IPEndPoint,
+                        localEndPoint: _tcpClient.Client.LocalEndPoint as IPEndPoint,
+                        _requestPool
+                        );
 
                 if (readResult == FlashHttpParser.TryReadHttpRequestResults.Incomplete)
                 {
@@ -113,16 +120,30 @@ internal class FlashHttpConnection
                 {
                     buffer = localBuffer;
 
-                    if (logger.IsEnabled(LogLevel.Information))
+                    if (_logger.IsEnabled(LogLevel.Information))
                     {
-                        logger.LogInformation("Received HTTP request: {Method} {Path}", request.Method, request.Path);
+                        _logger.LogInformation("Received HTTP request: {Method} {Path}", request.Method, request.Path);
                     }
 
-                    var response = new FlashHttpResponse();
+                    var response = _responsePool.Get();
 
-                    await handlerSet.HandleAsync(request, response, cancellationToken);
+                    try
+                    {
+                        await _handlerSet.HandleAsync(request, response, cancellationToken);
 
-                    await WriteHttpResponseAsync(writer, response, keepAlive, cancellationToken);
+                        _requestPool.Return(request);
+                        request = null;
+
+                        await WriteHttpResponseAsync(writer, response, keepAlive, cancellationToken);
+                    }
+                    finally
+                    {
+                        if (request != null)
+                        {
+                            _requestPool.Return(request);
+                        }
+                        _responsePool.Return(response);
+                    }
 
                     if (!keepAlive)
                     {

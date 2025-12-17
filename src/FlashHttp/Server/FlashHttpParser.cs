@@ -1,6 +1,7 @@
 ﻿using FlashHttp.Abstractions;
 using FlashHttp.Extensions;
 using FlashHttp.Helpers;
+using Microsoft.Extensions.ObjectPool;
 using System.Buffers;
 using System.Net;
 using System.Text;
@@ -36,7 +37,8 @@ internal static class FlashHttpParser
         out bool keepAlive,
         bool isHttps,
         IPEndPoint? remoteEndPoint,
-        IPEndPoint? localEndPoint)
+        IPEndPoint? localEndPoint,
+        ObjectPool<FlashHttpRequest>? requestPool)
     {
         request = default!;
         keepAlive = true;
@@ -71,7 +73,7 @@ internal static class FlashHttpParser
                 return TryReadHttpRequestResults.Incomplete;
 
             if (headerLineSeq.Length > MaxRequestLineSize)
-                throw new InvalidOperationException("Header line too long");
+                return TryReadHttpRequestResults.HeaderLineTooLong;
 
             if (headerLineSeq.Length == 0 || (headerLineSeq.Length == 1 && headerLineSeq.FirstSpan[0] == CR))
                 break;
@@ -173,21 +175,22 @@ internal static class FlashHttpParser
             _ => throw new InvalidOperationException($"Unsupported HTTP method: {method}")
         };
 
-        request = new FlashHttpRequest
-        {
-            Method = methodEnum,
-            Path = path,
-            Headers = headers,
-            ContentLength = contentLength,
-            ContentType = contentType,
-            IsHttps = isHttps,
-            KeepAliveRequested = keepAlive,
-            RemoteAddress = remoteEndPoint?.Address,
-            RemotePort = remoteEndPoint?.Port ?? 0,
-            HttpVersion = HttpVersions.Http11,
-            Port = localEndPoint?.Port ?? 0,
-            Body = body
-        };
+        request = requestPool?.Get() ?? new FlashHttpRequest();
+        if (request == null)
+            throw new InvalidOperationException("Failed to get FlashHttpRequest from pool.");
+
+        request.Method = methodEnum;
+        request.Path = path;
+        request.Headers = headers;
+        request.ContentLength = contentLength;
+        request.ContentType = contentType;
+        request.IsHttps = isHttps;
+        request.KeepAliveRequested = keepAlive;
+        request.RemoteAddress = remoteEndPoint?.Address;
+        request.RemotePort = remoteEndPoint?.Port ?? 0;
+        request.HttpVersion = HttpVersions.Http11;
+        request.Port = localEndPoint?.Port ?? 0;
+        request.Body = body;
 
         buffer = buffer.Slice(reader.Position);
         return TryReadHttpRequestResults.Success;
