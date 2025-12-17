@@ -167,7 +167,6 @@ internal class FlashHttpParser
         request.Port = localEndPoint?.Port ?? 0;
         request.Body = body;
 
-
         buffer = buffer.Slice(reader.Position);
 
         return TryReadHttpRequestResults.Success;
@@ -312,7 +311,27 @@ internal class FlashHttpParser
             return false;
         }
 
-        name = Encoding.ASCII.GetString(nameSpan);
+        if (nameSpan.SequenceEqual(CommonHeaders.ContentLengthBytes))
+        {
+            name = string.Intern("Content-Length");
+        }
+        else if (nameSpan.SequenceEqual(CommonHeaders.ContentTypeBytes))
+        {
+            name = string.Intern("Content-Type");
+        }
+        else if (nameSpan.SequenceEqual(CommonHeaders.ConnectionBytes))
+        {
+            name = string.Intern("Connection");
+        }
+        else if (nameSpan.SequenceEqual(CommonHeaders.HostBytes))
+        {
+            name = string.Intern("Host");
+        }
+        else
+        {
+            name = Encoding.ASCII.GetString(nameSpan);
+        }
+
         value = Encoding.ASCII.GetString(valueSpan);
         return true;
     }
