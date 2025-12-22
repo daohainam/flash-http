@@ -154,18 +154,19 @@ internal class FlashHttpParser
         if (request == null)
             throw new InvalidOperationException("Failed to get FlashHttpRequest from pool.");
 
-        request.Method = method;
-        request.Path = path;
-        request.Headers = headers;
-        request.ContentLength = contentLength;
-        request.ContentType = contentType;
-        request.IsHttps = isHttps;
-        request.KeepAliveRequested = keepAlive;
-        request.RemoteAddress = remoteEndPoint?.Address;
-        request.RemotePort = remoteEndPoint?.Port ?? 0;
-        request.HttpVersion = HttpVersions.Http11;
-        request.Port = localEndPoint?.Port ?? 0;
-        request.Body = body;
+        request.Init(
+            method,
+            localEndPoint?.Port ?? 0,
+            path,  
+            keepAlive,
+            contentLength,
+            contentType,
+            isHttps,
+            remoteEndPoint?.Address,
+            remoteEndPoint?.Port ?? 0,
+            HttpVersions.Http11,
+            headers,
+            body);
 
         buffer = buffer.Slice(reader.Position);
 

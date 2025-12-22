@@ -16,8 +16,7 @@ public sealed class HandlerSet
 {
     // Delegate cho async handlers 
     public delegate ValueTask FlashRequestAsyncDelegate(
-        FlashHttpRequest request,
-        FlashHttpResponse response,
+        IFlashHttpContext context,
         CancellationToken cancellationToken);
 
     public readonly Dictionary<string, FlashRequestAsyncDelegate> OnGetHandlers = [];
@@ -56,11 +55,11 @@ public sealed class HandlerSet
 
     #region Dispatch
 
-    public ValueTask HandleAsync(FlashHttpRequest request, FlashHttpResponse response, CancellationToken cancellationToken)
+    public ValueTask HandleAsync(IFlashHttpContext context, CancellationToken cancellationToken)
     {
         Dictionary<string, FlashRequestAsyncDelegate>? asyncHandlers = null;
 
-        switch (request.Method)
+        switch (context.Request.Method)
         {
             case HttpMethodsEnum.Get:
                 asyncHandlers = OnGetHandlers;
@@ -85,12 +84,12 @@ public sealed class HandlerSet
                 break;
         }
 
-        if (asyncHandlers != null && asyncHandlers.TryGetValue(request.Path, out var asyncHandler))
+        if (asyncHandlers != null && asyncHandlers.TryGetValue(context.Request.Path, out var asyncHandler))
         {
-            return asyncHandler(request, response, cancellationToken);
+            return asyncHandler(context, cancellationToken);
         }
 
-        SetNotFound(response);
+        SetNotFound(context.Response);
         return ValueTask.CompletedTask;
     }
 

@@ -9,11 +9,11 @@ public sealed class Worker(FlashHttpServerOptions options, ILogger<Worker> logge
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var server = new FlashHttpServer(options, null);
-        server.WithHandler(HttpMethodsEnum.Get, "/", async (request, response, cancellationToken) =>
+        server.WithHandler(HttpMethodsEnum.Get, "/", async (context, cancellationToken) =>
         {
-            response.StatusCode = 200;
-            response.Headers.Add(new HttpHeader("Content-Type", "text/plain; charset=utf-8"));
-            response.Body = Encoding.UTF8.GetBytes("Hello, FlashHttp!");
+            context.Response.StatusCode = 200;
+            context.Response.Headers.Add(new HttpHeader("Content-Type", "text/plain; charset=utf-8"));
+            context.Response.Body = Encoding.UTF8.GetBytes("Hello, FlashHttp!");
         });
 
         logger.LogInformation("Starting FlashHttp server...");

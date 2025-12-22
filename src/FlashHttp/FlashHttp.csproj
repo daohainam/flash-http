@@ -15,4 +15,8 @@
 	<ItemGroup>
 		<InternalsVisibleTo Include="BenchmarkSuite" />
 	</ItemGroup>
+
+	<ItemGroup>
+	  <ProjectReference Include="..\FlashHttp.Abstractions\FlashHttp.Abstractions.csproj" />
+	</ItemGroup>
 </Project>

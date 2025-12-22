@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="benchmark/BenchmarkSuite/BenchmarkSuite.csproj" />
+  <Project Path="src/FlashHttp.Abstractions/FlashHttp.Abstractions.csproj" Id="949d7828-9c6f-4e16-ba98-50e4359af494" />
   <Project Path="src/FlashHttp/FlashHttp.csproj" />
   <Project Path="src/FlashHttpDemo/FlashHttpDemo.csproj" />
 </Solution>

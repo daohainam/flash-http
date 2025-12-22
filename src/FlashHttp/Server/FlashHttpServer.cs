@@ -16,6 +16,7 @@ public class FlashHttpServer: IDisposable
 
     private readonly ObjectPool<FlashHttpRequest> _requestPool;
     private readonly ObjectPool<FlashHttpResponse> _responsePool;
+    private readonly ObjectPool<FlashHttpContext> _contextPool;
 
     private readonly HandlerSet handlerSet = new();
     private TcpListener? listener;
@@ -31,6 +32,7 @@ public class FlashHttpServer: IDisposable
         };
         _requestPool = poolProvider.Create(new FlashHttpRequestPooledObjectPolicy());
         _responsePool = poolProvider.Create(new FlashHttpResponsePooledObjectPolicy());
+        _contextPool = poolProvider.Create(new FlashHttpContextPooledObjectPolicy());
     }
 
     public FlashHttpServer(Action<FlashHttpServerOptions>? configureOptions = null, ILogger? logger = null)
@@ -46,6 +48,7 @@ public class FlashHttpServer: IDisposable
         };
         _requestPool = poolProvider.Create(new FlashHttpRequestPooledObjectPolicy());
         _responsePool = poolProvider.Create(new FlashHttpResponsePooledObjectPolicy());
+        _contextPool = poolProvider.Create(new FlashHttpContextPooledObjectPolicy());
     }
 
     public FlashHttpServer WithHandler(HttpMethodsEnum method, string path, FlashRequestAsyncDelegate handler)
@@ -151,7 +154,7 @@ public class FlashHttpServer: IDisposable
                 isHttps = true;
             }
 
-            var connection = new FlashHttpConnection(tcpClient, stream, isHttps, handlerSet, _requestPool, _responsePool, _logger);
+            var connection = new FlashHttpConnection(tcpClient, stream, isHttps, handlerSet, _requestPool, _responsePool, _contextPool, _logger);
             await connection.ProcessRequestsAsync(cancellationToken);
         }
         catch (OperationCanceledException)

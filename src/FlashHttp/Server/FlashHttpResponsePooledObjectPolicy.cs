@@ -15,8 +15,7 @@ internal sealed class FlashHttpResponsePooledObjectPolicy : PooledObjectPolicy<F
         {
             StatusCode = 404,
             ReasonPhrase = string.Empty,
-            Body = [],
-            Headers = new List<HttpHeader>(8)
+            Body = []
         };
     }
 

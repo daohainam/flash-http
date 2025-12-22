@@ -22,16 +22,20 @@ internal class FlashHttpConnection
     private readonly HandlerSet handlerSet;
     private readonly ObjectPool<FlashHttpRequest> _requestPool;
     private readonly ObjectPool<FlashHttpResponse> _responsePool;
+    private readonly ObjectPool<FlashHttpContext> _contextPool;
     private readonly ILogger logger;
 
-    public FlashHttpConnection(TcpClient tcpClient, Stream stream, bool isHttps, HandlerSet handlerSet, ObjectPool<FlashHttpRequest> requestPool, ObjectPool<FlashHttpResponse> responsePool, ILogger logger)
+    public FlashHttpConnection(TcpClient tcpClient, Stream stream, bool isHttps, HandlerSet handlerSet, 
+        ObjectPool<FlashHttpRequest> requestPool, ObjectPool<FlashHttpResponse> responsePool, ObjectPool<FlashHttpContext> contextPool,
+        ILogger logger)
     {
         this.tcpClient = tcpClient;
         this.stream = stream;
         this.isHttps = isHttps;
         this.handlerSet = handlerSet;
-        this._requestPool = requestPool;
-        this._responsePool = responsePool;
+        _requestPool = requestPool;
+        _responsePool = responsePool;
+        _contextPool = contextPool;
         this.logger = logger;
     }
 
@@ -131,10 +135,14 @@ internal class FlashHttpConnection
                     }
 
                     var response = _responsePool.Get();
+                    var context = _contextPool.Get();
+
+                    context.Request = request;
+                    context.Response = response;
 
                     try
                     {
-                        await handlerSet.HandleAsync(request, response, cancellationToken);
+                        await handlerSet.HandleAsync(context, cancellationToken);
 
                         _requestPool.Return(request);
                         request = null;

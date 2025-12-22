@@ -8,6 +8,22 @@ namespace FlashHttp.Abstractions;
 
 public class FlashHttpRequest
 {
+    public void Init(HttpMethodsEnum method, int port, string path, bool keepAliveRequested, long contentLength, string contentType, bool isHttps, IPAddress? remoteAddress, int remotePort, HttpVersions httpVersion, List<HttpHeader> headers, byte[] body)
+    {
+        Method = method;
+        Port = port;
+        Path = path ?? throw new ArgumentNullException(nameof(path));
+        KeepAliveRequested = keepAliveRequested;
+        ContentLength = contentLength;
+        ContentType = contentType ?? throw new ArgumentNullException(nameof(contentType));
+        IsHttps = isHttps;
+        RemoteAddress = remoteAddress;
+        RemotePort = remotePort;
+        HttpVersion = httpVersion;
+        Headers = headers ?? throw new ArgumentNullException(nameof(headers));
+        Body = body ?? throw new ArgumentNullException(nameof(body));
+    }
+
     public HttpMethodsEnum Method { get; internal set; } = HttpMethodsEnum.Get;
     public int Port { get; internal set; } = 80;
     public string Path { get; internal set; } = "/";
