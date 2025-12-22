@@ -8,7 +8,9 @@ public sealed class Worker(FlashHttpServerOptions options, ILogger<Worker> logge
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var server = new FlashHttpServer(options, null);
+        var builder = FlashHttpServerBuilder.CreateBuilder().UseOptions(options);
+
+        var server = builder.Build();
         server.WithHandler(HttpMethodsEnum.Get, "/", async (context, cancellationToken) =>
         {
             context.Response.StatusCode = 200;

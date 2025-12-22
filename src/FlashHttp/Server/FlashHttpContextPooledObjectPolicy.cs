@@ -3,18 +3,18 @@ using Microsoft.Extensions.ObjectPool;
 
 namespace FlashHttp.Server
 {
-    internal class FlashHttpContextPooledObjectPolicy : IPooledObjectPolicy<FlashHttpContext>
+    internal class FlashHttpContextPooledObjectPolicy : IPooledObjectPolicy<FlashHandlerContext>
     {
-        public FlashHttpContext Create()
+        public FlashHandlerContext Create()
         {
-            return new FlashHttpContext
+            return new FlashHandlerContext
             {
                 Request = default!,
                 Response = default!
             };
         }
 
-        public bool Return(FlashHttpContext obj)
+        public bool Return(FlashHandlerContext obj)
         {
             obj.Request = default!;
             obj.Response = default!;

@@ -16,7 +16,7 @@ public sealed class HandlerSet
 {
     // Delegate cho async handlers 
     public delegate ValueTask FlashRequestAsyncDelegate(
-        IFlashHttpContext context,
+        IFlashHandlerContext context,
         CancellationToken cancellationToken);
 
     public readonly Dictionary<string, FlashRequestAsyncDelegate> OnGetHandlers = [];
@@ -55,7 +55,7 @@ public sealed class HandlerSet
 
     #region Dispatch
 
-    public ValueTask HandleAsync(IFlashHttpContext context, CancellationToken cancellationToken)
+    public ValueTask HandleAsync(IFlashHandlerContext context, CancellationToken cancellationToken)
     {
         Dictionary<string, FlashRequestAsyncDelegate>? asyncHandlers = null;
 

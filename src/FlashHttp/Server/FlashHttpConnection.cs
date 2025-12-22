@@ -1,4 +1,5 @@
 ﻿using FlashHttp.Abstractions;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.ObjectPool;
 using System.Buffers;
@@ -22,12 +23,13 @@ internal class FlashHttpConnection
     private readonly HandlerSet handlerSet;
     private readonly ObjectPool<FlashHttpRequest> _requestPool;
     private readonly ObjectPool<FlashHttpResponse> _responsePool;
-    private readonly ObjectPool<FlashHttpContext> _contextPool;
+    private readonly ObjectPool<FlashHandlerContext> _contextPool;
+    private readonly IServiceProvider services;
     private readonly ILogger logger;
 
     public FlashHttpConnection(TcpClient tcpClient, Stream stream, bool isHttps, HandlerSet handlerSet, 
-        ObjectPool<FlashHttpRequest> requestPool, ObjectPool<FlashHttpResponse> responsePool, ObjectPool<FlashHttpContext> contextPool,
-        ILogger logger)
+        ObjectPool<FlashHttpRequest> requestPool, ObjectPool<FlashHttpResponse> responsePool, ObjectPool<FlashHandlerContext> contextPool,
+        IServiceProvider services, ILogger logger)
     {
         this.tcpClient = tcpClient;
         this.stream = stream;
@@ -36,6 +38,7 @@ internal class FlashHttpConnection
         _requestPool = requestPool;
         _responsePool = responsePool;
         _contextPool = contextPool;
+        this.services = services;
         this.logger = logger;
     }
 
@@ -140,6 +143,9 @@ internal class FlashHttpConnection
                     context.Request = request;
                     context.Response = response;
 
+                    using var servicesScope = services.CreateScope();
+                    context.Services = servicesScope.ServiceProvider;
+
                     try
                     {
                         await handlerSet.HandleAsync(context, cancellationToken);
@@ -148,6 +154,12 @@ internal class FlashHttpConnection
                         request = null;
 
                         await WriteHttpResponseAsync(writer, response, keepAlive, cancellationToken);
+
+                        _responsePool.Return(response);
+                        response = null;
+
+                        _contextPool.Return(context);
+                        context = null;
                     }
                     finally
                     {
@@ -155,7 +167,14 @@ internal class FlashHttpConnection
                         {
                             _requestPool.Return(request);
                         }
-                        _responsePool.Return(response);
+                        if (response != null)
+                        {
+                            _responsePool.Return(response);
+                        }
+                        if (context != null)
+                        {
+                            _contextPool.Return(context);
+                        }
                     }
                 }
                 else

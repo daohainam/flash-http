@@ -1,4 +1,5 @@
 ﻿using FlashHttp.Abstractions;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.ObjectPool;
@@ -12,18 +13,20 @@ namespace FlashHttp.Server;
 public class FlashHttpServer: IDisposable
 {
     private readonly FlashHttpServerOptions _options;
+    private readonly IServiceProvider _serviceProvider;
     private readonly ILogger _logger;
 
     private readonly ObjectPool<FlashHttpRequest> _requestPool;
     private readonly ObjectPool<FlashHttpResponse> _responsePool;
-    private readonly ObjectPool<FlashHttpContext> _contextPool;
+    private readonly ObjectPool<FlashHandlerContext> _contextPool;
 
     private readonly HandlerSet handlerSet = new();
     private TcpListener? listener;
 
-    public FlashHttpServer(FlashHttpServerOptions options, ILogger? logger = null)
+    public FlashHttpServer(FlashHttpServerOptions options, IServiceProvider serviceProvider, ILogger? logger = null)
     {
         _options = options;
+        _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
         _logger = logger ?? NullLogger<FlashHttpServer>.Instance;
 
         var poolProvider = new DefaultObjectPoolProvider
@@ -35,10 +38,12 @@ public class FlashHttpServer: IDisposable
         _contextPool = poolProvider.Create(new FlashHttpContextPooledObjectPolicy());
     }
 
-    public FlashHttpServer(Action<FlashHttpServerOptions>? configureOptions = null, ILogger? logger = null)
+    public FlashHttpServer(IServiceProvider serviceProvider, Action<FlashHttpServerOptions>? configureOptions = null, ILogger? logger = null)
     {
         _options = new FlashHttpServerOptions();
         configureOptions?.Invoke(_options);
+
+        _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
 
         _logger = logger ?? NullLogger<FlashHttpServer>.Instance;
 
@@ -154,7 +159,7 @@ public class FlashHttpServer: IDisposable
                 isHttps = true;
             }
 
-            var connection = new FlashHttpConnection(tcpClient, stream, isHttps, handlerSet, _requestPool, _responsePool, _contextPool, _logger);
+            var connection = new FlashHttpConnection(tcpClient, stream, isHttps, handlerSet, _requestPool, _responsePool, _contextPool, _serviceProvider, _logger);
             await connection.ProcessRequestsAsync(cancellationToken);
         }
         catch (OperationCanceledException)
