@@ -2,7 +2,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.ObjectPool;
-using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
