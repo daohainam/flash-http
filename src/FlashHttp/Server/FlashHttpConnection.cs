@@ -3,11 +3,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.ObjectPool;
 using System.Buffers;
-using System.IO;
+using System.Buffers.Text;
 using System.IO.Pipelines;
 using System.Net;
-using System.Net.Http;
-using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Text;
 
@@ -231,45 +229,37 @@ internal class FlashHttpConnection
     {
         var body = response.Body ?? Array.Empty<byte>();
 
-        bool hasContentLength = false;
-        bool hasConnection = false;
+        // IMPORTANT: ReasonPhrase trong FlashHttpResponse hiện default là string.Empty,
+        // nên dùng IsNullOrEmpty để fallback.
+        string reason = string.IsNullOrEmpty(response.ReasonPhrase)
+            ? GetReasonPhrase(response.StatusCode)
+            : response.ReasonPhrase;
 
-        foreach (var h in response.Headers)
-        {
-            if (h.Name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
-            {
-                hasContentLength = true;
-            }
-            else if (h.Name.Equals("Connection", StringComparison.OrdinalIgnoreCase))
-            {
-                hasConnection = true;
-            }
-        }
-
-        if (!hasContentLength)
-        {
-            response.Headers.Add(new HttpHeader("Content-Length", body.Length.ToString()));
-        }
-
-        if (!hasConnection)
-        {
-            response.Headers.Add(new HttpHeader("Connection", keepAlive ? "keep-alive" : "close"));
-        }
-
-        string reason = response.ReasonPhrase ?? GetReasonPhrase(response.StatusCode);
-
-        // Status line
-        // HTTP/1.1 200 OK\r\n
+        // ---- Status line: HTTP/1.1 <status> <reason>\r\n
         WriteBytes(writer, Http11Bytes);
-        WriteAscii(writer, response.StatusCode.ToString());
+        WriteInt32Ascii(writer, response.StatusCode);
         WriteAscii(writer, " ");
         WriteAscii(writer, reason);
         WriteCRLF(writer);
 
-        // Headers
+        // ---- Core headers (server-owned): always write, always correct
+        // Content-Length: <body.Length>\r\n
+        WriteBytes(writer, "Content-Length: "u8);
+        WriteInt32Ascii(writer, body.Length);
+        WriteCRLF(writer);
+
+        // Connection: keep-alive/close\r\n
+        WriteBytes(writer, "Connection: "u8);
+        WriteBytes(writer, keepAlive ? "keep-alive"u8 : "close"u8);
+        WriteCRLF(writer);
+
+        // ---- Extra headers from handler, but skip reserved ones (override)
         foreach (var h in response.Headers)
         {
-            // Name: Value\r\n
+            // Skip reserved headers to avoid duplicates / semantic mismatch
+            if (IsReservedResponseHeader(h.Name))
+                continue;
+
             WriteAscii(writer, h.Name);
             WriteAscii(writer, ": ");
             WriteAscii(writer, h.Value);
@@ -281,13 +271,9 @@ internal class FlashHttpConnection
 
         // Body
         if (body.Length > 0)
-        {
-            writer.Write(body); // PipeWriterExtensions.Write(ReadOnlySpan<byte>)
-        }
+            writer.Write(body);
 
-        FlushResult result = await writer.FlushAsync(ct);
-
-        // check result.IsCompleted/IsCanceled
+        await writer.FlushAsync(ct);
     }
 
     private static string GetReasonPhrase(int statusCode)
@@ -327,4 +313,32 @@ internal class FlashHttpConnection
         span[1] = (byte)'\n';
         writer.Advance(2);
     }
+
+    private const string HeaderContentLength = "Content-Length";
+    private const string HeaderConnection = "Connection";
+
+    private static bool IsReservedResponseHeader(string name)
+    {
+        // nhanh hơn một chút: check length trước
+        if (name.Length == HeaderContentLength.Length &&
+            name.Equals(HeaderContentLength, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (name.Length == HeaderConnection.Length &&
+            name.Equals(HeaderConnection, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return false;
+    }
+
+    private static void WriteInt32Ascii(PipeWriter writer, int value)
+    {
+        // Int32.MinValue = -2147483648 => 11 chars max
+        Span<byte> span = writer.GetSpan(11);
+        if (!Utf8Formatter.TryFormat(value, span, out int written))
+            throw new InvalidOperationException("Failed to format int.");
+
+        writer.Advance(written);
+    }
+
 }
