@@ -1,24 +1,24 @@
 ﻿using FlashHttp.Abstractions;
 using Microsoft.Extensions.ObjectPool;
 
-namespace FlashHttp.Server
+namespace FlashHttp.Server;
+internal class FlashHttpContextPooledObjectPolicy : IPooledObjectPolicy<FlashHandlerContext>
 {
-    internal class FlashHttpContextPooledObjectPolicy : IPooledObjectPolicy<FlashHandlerContext>
+    public FlashHandlerContext Create()
     {
-        public FlashHandlerContext Create()
+        return new FlashHandlerContext
         {
-            return new FlashHandlerContext
-            {
-                Request = default!,
-                Response = default!
-            };
-        }
+            Request = default!,
+            Response = default!,
+            Services = default!
+        };
+    }
 
-        public bool Return(FlashHandlerContext obj)
-        {
-            obj.Request = default!;
-            obj.Response = default!;
-            return true;
-        }
+    public bool Return(FlashHandlerContext obj)
+    {
+        obj.Request = default!;
+        obj.Response = default!;
+        obj.Services = default!;
+        return true;
     }
 }

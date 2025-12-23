@@ -25,9 +25,10 @@ internal class FlashHttpConnection
     private readonly ObjectPool<FlashHttpResponse> _responsePool;
     private readonly ObjectPool<FlashHandlerContext> _contextPool;
     private readonly IServiceProvider services;
+    private readonly IServiceScopeFactory? scopeFactory;
     private readonly ILogger logger;
 
-    public FlashHttpConnection(TcpClient tcpClient, Stream stream, bool isHttps, HandlerSet handlerSet, 
+    public FlashHttpConnection(TcpClient tcpClient, Stream stream, bool isHttps, HandlerSet handlerSet,
         ObjectPool<FlashHttpRequest> requestPool, ObjectPool<FlashHttpResponse> responsePool, ObjectPool<FlashHandlerContext> contextPool,
         IServiceProvider services, ILogger logger)
     {
@@ -39,6 +40,7 @@ internal class FlashHttpConnection
         _responsePool = responsePool;
         _contextPool = contextPool;
         this.services = services;
+        this.scopeFactory = services.GetService<IServiceScopeFactory>();
         this.logger = logger;
     }
 
@@ -74,31 +76,41 @@ internal class FlashHttpConnection
 
     private static async Task FillPipeAsync(Stream stream, PipeWriter writer, CancellationToken cancellationToken)
     {
-        const int minimumBufferSize = 4096;
-
-        while (true)
+        Exception? error = null;
+        try
         {
-            Memory<byte> memory = writer.GetMemory(minimumBufferSize);
-            int bytesRead = await stream.ReadAsync(memory, cancellationToken);
+            const int minimumBufferSize = 4096;
 
-            if (bytesRead == 0)
+            while (true)
             {
-                break;
-            }
+                Memory<byte> memory = writer.GetMemory(minimumBufferSize);
+                int bytesRead = await stream.ReadAsync(memory, cancellationToken);
 
-            writer.Advance(bytesRead);
+                if (bytesRead == 0)
+                {
+                    break;
+                }
 
-            FlushResult result = await writer.FlushAsync(cancellationToken);
+                writer.Advance(bytesRead);
 
-            if (result.IsCompleted || result.IsCanceled)
-            {
-                break;
+                FlushResult result = await writer.FlushAsync(cancellationToken);
+
+                if (result.IsCompleted || result.IsCanceled)
+                {
+                    break;
+                }
             }
         }
-
-        await writer.CompleteAsync();
+        catch (Exception ex)
+        {
+            error = ex;
+            throw;
+        }
+        finally
+        {
+            try { await writer.CompleteAsync(error).ConfigureAwait(false); } catch { }
+        }
     }
-
     private async Task ReadPipeAsync(PipeReader reader, PipeWriter writer, CancellationTokenSource connectionCts, CancellationToken cancellationToken)
     {
         bool connectionClose = false;
@@ -143,11 +155,20 @@ internal class FlashHttpConnection
                     context.Request = request;
                     context.Response = response;
 
-                    using var servicesScope = services.CreateScope();
-                    context.Services = servicesScope.ServiceProvider;
+                    IServiceScope? servicesScope = null;
 
                     try
                     {
+                        if (scopeFactory is null)
+                        {
+                            context.Services = services;
+                        }
+                        else
+                        {
+                            servicesScope = scopeFactory.CreateScope();
+                            context.Services = servicesScope.ServiceProvider;
+                        }
+
                         await handlerSet.HandleAsync(context, cancellationToken);
 
                         _requestPool.Return(request);
@@ -163,6 +184,7 @@ internal class FlashHttpConnection
                     }
                     finally
                     {
+                        servicesScope?.Dispose();
                         if (request != null)
                         {
                             _requestPool.Return(request);
@@ -199,7 +221,6 @@ internal class FlashHttpConnection
         }
 
         await reader.CompleteAsync();
-        await writer.CompleteAsync();
     }
 
     private static async ValueTask WriteHttpResponseAsync(
