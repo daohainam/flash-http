@@ -16,6 +16,11 @@ public sealed class Worker(FlashHttpServerOptions options, ILogger<Worker> logge
             context.Response.StatusCode = 200;
             context.Response.Headers.Add(new HttpHeader("Content-Type", "text/plain; charset=utf-8"));
             context.Response.Body = Encoding.UTF8.GetBytes("Hello, FlashHttp!");
+        })
+        .Use(async (ctx, next, ct) =>
+        {
+            await next(ctx, ct);
+            ctx.Response.Headers.Add(new HttpHeader("X-Server", "FlashHttp"));
         });
 
         logger.LogInformation("Starting FlashHttp server...");

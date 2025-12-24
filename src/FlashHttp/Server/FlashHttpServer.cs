@@ -10,7 +10,8 @@ using System.Security.Authentication;
 using static FlashHttp.Server.HandlerSet;
 
 namespace FlashHttp.Server;
-public class FlashHttpServer: IDisposable
+
+public class FlashHttpServer : IDisposable
 {
     private readonly FlashHttpServerOptions _options;
     private readonly IServiceProvider _serviceProvider;
@@ -22,6 +23,9 @@ public class FlashHttpServer: IDisposable
 
     private readonly HandlerSet handlerSet = new();
     private TcpListener? listener;
+
+    private readonly FlashPipelineBuilder _globalPipeline = new();
+    private FlashRequestAsyncDelegate? _app;
 
     public FlashHttpServer(FlashHttpServerOptions options, IServiceProvider serviceProvider, ILogger? logger = null)
     {
@@ -44,7 +48,6 @@ public class FlashHttpServer: IDisposable
         configureOptions?.Invoke(_options);
 
         _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
-
         _logger = logger ?? NullLogger<FlashHttpServer>.Instance;
 
         var poolProvider = new DefaultObjectPoolProvider
@@ -54,6 +57,12 @@ public class FlashHttpServer: IDisposable
         _requestPool = poolProvider.Create(new FlashHttpRequestPooledObjectPolicy());
         _responsePool = poolProvider.Create(new FlashHttpResponsePooledObjectPolicy());
         _contextPool = poolProvider.Create(new FlashHttpContextPooledObjectPolicy());
+    }
+
+    public FlashHttpServer Use(FlashMiddleware middleware)
+    {
+        _globalPipeline.Use(middleware);
+        return this;
     }
 
     public FlashHttpServer WithHandler(HttpMethodsEnum method, string path, FlashRequestAsyncDelegate handler)
@@ -90,6 +99,8 @@ public class FlashHttpServer: IDisposable
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
+        _app ??= _globalPipeline.Build(handlerSet.HandleAsync);
+
         if (_logger.IsEnabled(LogLevel.Information))
         {
             _logger.LogInformation("Starting listening on {address}:{port}", _options.Address, _options.Port);
@@ -149,7 +160,7 @@ public class FlashHttpServer: IDisposable
                         SslApplicationProtocol.Http11
                     ],
                     ServerCertificate = _options.Certificate,
-                    EnabledSslProtocols = SslProtocols.None, // use the system default version
+                    EnabledSslProtocols = SslProtocols.None,
                     ClientCertificateRequired = false,
                 };
 
@@ -159,12 +170,23 @@ public class FlashHttpServer: IDisposable
                 isHttps = true;
             }
 
-            var connection = new FlashHttpConnection(tcpClient, stream, isHttps, handlerSet, _requestPool, _responsePool, _contextPool, _serviceProvider, _logger);
+            var app = _app ?? _globalPipeline.Build(handlerSet.HandleAsync);
+
+            var connection = new FlashHttpConnection(
+                tcpClient,
+                stream,
+                isHttps,
+                app,
+                _requestPool,
+                _responsePool,
+                _contextPool,
+                _serviceProvider,
+                _logger);
+
             await connection.ProcessRequestsAsync(cancellationToken);
         }
         catch (OperationCanceledException)
         {
-            // normal shutdown
         }
         catch (AuthenticationException ex)
         {
@@ -181,16 +203,13 @@ public class FlashHttpServer: IDisposable
             tcpClient.Dispose();
         }
     }
+
     private static TcpListener CreateListener(IPAddress address, int port)
     {
-        // Default Address.Any is IPv4-only (0.0.0.0). Many clients (and tools like bombardier)
-        // resolve localhost to IPv6 (::1) first, which would get "connection refused".
-        // If user didn't specify an explicit address, listen on IPv6Any with DualMode,
-        // so we accept both IPv4 and IPv6 connections.
         if (address.Equals(IPAddress.Any))
         {
             var l = new TcpListener(IPAddress.IPv6Any, port);
-            try { l.Server.DualMode = true; } catch { /* ignore if not supported */ }
+            try { l.Server.DualMode = true; } catch { }
             return l;
         }
 

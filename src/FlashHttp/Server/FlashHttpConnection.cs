@@ -8,6 +8,7 @@ using System.IO.Pipelines;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using static FlashHttp.Server.HandlerSet;
 
 namespace FlashHttp.Server;
 
@@ -18,7 +19,7 @@ internal partial class FlashHttpConnection
     private readonly TcpClient tcpClient;
     private readonly Stream stream;
     private readonly bool isHttps;
-    private readonly HandlerSet handlerSet;
+    private readonly FlashRequestAsyncDelegate app;
     private readonly ObjectPool<FlashHttpRequest> _requestPool;
     private readonly ObjectPool<FlashHttpResponse> _responsePool;
     private readonly ObjectPool<FlashHandlerContext> _contextPool;
@@ -26,14 +27,21 @@ internal partial class FlashHttpConnection
     private readonly IServiceScopeFactory? scopeFactory;
     private readonly ILogger logger;
 
-    public FlashHttpConnection(TcpClient tcpClient, Stream stream, bool isHttps, HandlerSet handlerSet,
-        ObjectPool<FlashHttpRequest> requestPool, ObjectPool<FlashHttpResponse> responsePool, ObjectPool<FlashHandlerContext> contextPool,
-        IServiceProvider services, ILogger logger)
+    public FlashHttpConnection(
+        TcpClient tcpClient,
+        Stream stream,
+        bool isHttps,
+        FlashRequestAsyncDelegate app,
+        ObjectPool<FlashHttpRequest> requestPool,
+        ObjectPool<FlashHttpResponse> responsePool,
+        ObjectPool<FlashHandlerContext> contextPool,
+        IServiceProvider services,
+        ILogger logger)
     {
         this.tcpClient = tcpClient;
         this.stream = stream;
         this.isHttps = isHttps;
-        this.handlerSet = handlerSet;
+        this.app = app;
         _requestPool = requestPool;
         _responsePool = responsePool;
         _contextPool = contextPool;
@@ -167,7 +175,7 @@ internal partial class FlashHttpConnection
                             context.Services = servicesScope.ServiceProvider;
                         }
 
-                        await handlerSet.HandleAsync(context, cancellationToken);
+                        await app(context, cancellationToken);
 
                         _requestPool.Return(request);
                         request = null;
