@@ -11,7 +11,7 @@ using System.Text;
 
 namespace FlashHttp.Server;
 
-internal class FlashHttpConnection
+internal partial class FlashHttpConnection
 {
     private static readonly byte[] Http11Bytes = Encoding.ASCII.GetBytes("HTTP/1.1 ");
 
@@ -282,14 +282,6 @@ internal class FlashHttpConnection
             ? reason
             : "Unknown";
     }
-
-    private static readonly Dictionary<int, string> ReasonPhrases = new()
-    {
-        { 200, "OK" },
-        { 400, "Bad Request" },
-        { 404, "Not Found" },
-        { 500, "Internal Server Error" },
-    };
 
     private static void WriteAscii(PipeWriter writer, string text)
     {
