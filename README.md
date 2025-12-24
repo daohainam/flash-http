@@ -1,5 +1,7 @@
 # FlashHttp
 
+**No ASP.NET** stuffs!
+
 A tiny, embeddable HTTP/1.1 server for .NET focused on:
 - High performance – very low overhead, optimized parsing and writing
 - Low memory usage – minimal allocations, small object model
