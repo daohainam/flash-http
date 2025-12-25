@@ -49,29 +49,11 @@ public static class FlashHttpRequestExtensions
         return span.ToString().Split('/', StringSplitOptions.RemoveEmptyEntries);
     }
 
-    public static ReadOnlySpan<char> GetQueryString(this FlashHttpRequest request)
-    {
-        var path = request.Path;
-        if (string.IsNullOrEmpty(path))
-        {
-            return [];
-        }
-
-        ReadOnlySpan<char> span = path.AsSpan();
-        int idx = span.IndexOf('?');
-        if (idx < 0 || idx >= span.Length - 1)
-        {
-            return [];
-        }
-
-        return span[(idx + 1)..];
-    }
-
     public static Dictionary<string, string> ParseQueryParameters(this FlashHttpRequest request)
     {
-        var queryString = request.GetQueryString();
+        var queryString = request.QueryString;
         var queryParameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (queryString.IsEmpty)
+        if (string.IsNullOrEmpty(queryString))
         {
             return queryParameters;
         }

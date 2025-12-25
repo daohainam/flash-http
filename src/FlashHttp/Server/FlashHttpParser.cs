@@ -54,7 +54,7 @@ internal class FlashHttpParser
         if (requestLineSeq.Length > MaxRequestLineSize)
             return TryReadHttpRequestResults.RequestLineTooLong;
 
-        if (!TryParseRequestLine(requestLineSeq, out var method, out string path, out var version))
+        if (!TryParseRequestLine(requestLineSeq, out var method, out string path, out string queryString, out var version))
             return TryReadHttpRequestResults.InvalidRequest;
 
         if (version != HttpVersions.Http11)
@@ -157,7 +157,8 @@ internal class FlashHttpParser
         request.Init(
             method,
             localEndPoint?.Port ?? 0,
-            path,  
+            path,
+            queryString,
             keepAlive,
             contentLength,
             contentType,
@@ -188,12 +189,14 @@ internal class FlashHttpParser
     in ReadOnlySequence<byte> lineSeq,
     out HttpMethodsEnum method,
     out string path,
+    out string queryString,
     out HttpVersions version)
     {
         if (lineSeq.Length == 0)
         {
             method = HttpMethodsEnum.Get;
             path = "";
+            queryString = "";
             version = HttpVersions.Unknown;
             return false;
         }
@@ -217,6 +220,7 @@ internal class FlashHttpParser
         {
             method = HttpMethodsEnum.Get;
             path = "";
+            queryString = "";
             version = HttpVersions.Unknown;
             return false;
         }
@@ -226,6 +230,7 @@ internal class FlashHttpParser
         {
             method = HttpMethodsEnum.Get;
             path = "";
+            queryString = "";
             version = HttpVersions.Unknown;
             return false;
         }
@@ -234,6 +239,7 @@ internal class FlashHttpParser
 
         ReadOnlySpan<byte> methodSpan = line[..firstSpace];
         ReadOnlySpan<byte> pathSpan = line.Slice(firstSpace + 1, secondSpace - firstSpace - 1);
+        int queryIndex = pathSpan.IndexOf((byte)'?');
         ReadOnlySpan<byte> versionSpan = line[(secondSpace + 1)..];
 
         if (methodSpan.SequenceEqual(GetBytes))
@@ -254,11 +260,24 @@ internal class FlashHttpParser
         {
             method = HttpMethodsEnum.Get; // default
             path = "";
+            queryString = "";
             version = HttpVersions.Unknown;
             return false;
         }
 
-        path = Encoding.ASCII.GetString(pathSpan);
+        if (queryIndex >= 0)
+        {
+            var pathOnlySpan = pathSpan[..queryIndex];
+            var querySpan = pathSpan[(queryIndex + 1)..];
+            path = Encoding.ASCII.GetString(pathOnlySpan);
+            queryString = Encoding.ASCII.GetString(querySpan);
+        }
+        else
+        {
+            path = Encoding.ASCII.GetString(pathSpan);
+            queryString = "";
+        }
+
         version = versionSpan.SequenceEqual(Http11Bytes) ? HttpVersions.Http11 : HttpVersions.Unknown;
 
         return true;
