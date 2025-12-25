@@ -12,4 +12,6 @@ public class FlashHttpServerOptions
     public X509Certificate2? Certificate { get; set; }
 
     public int RequestPoolMaximumRetained { get; set; } = 1024;
+
+    public bool MetricsEnabled { get; set; } = true;
 }

@@ -20,6 +20,7 @@ internal partial class FlashHttpConnection
     private readonly Stream stream;
     private readonly bool isHttps;
     private readonly FlashRequestAsyncDelegate app;
+    private readonly bool metricsEnabled;
     private readonly ObjectPool<FlashHttpRequest> _requestPool;
     private readonly ObjectPool<FlashHttpResponse> _responsePool;
     private readonly ObjectPool<FlashHandlerContext> _contextPool;
@@ -32,6 +33,7 @@ internal partial class FlashHttpConnection
         Stream stream,
         bool isHttps,
         FlashRequestAsyncDelegate app,
+        bool metricsEnabled,
         ObjectPool<FlashHttpRequest> requestPool,
         ObjectPool<FlashHttpResponse> responsePool,
         ObjectPool<FlashHandlerContext> contextPool,
@@ -42,6 +44,7 @@ internal partial class FlashHttpConnection
         this.stream = stream;
         this.isHttps = isHttps;
         this.app = app;
+        this.metricsEnabled = metricsEnabled;
         _requestPool = requestPool;
         _responsePool = responsePool;
         _contextPool = contextPool;
@@ -163,6 +166,12 @@ internal partial class FlashHttpConnection
 
                     IServiceScope? servicesScope = null;
 
+                    long startTs = 0;
+                    if (metricsEnabled)
+                    {
+                        startTs = FlashHttpMetrics.GetTimestamp();
+                    }
+
                     try
                     {
                         if (scopeFactory is null)
@@ -182,11 +191,32 @@ internal partial class FlashHttpConnection
 
                         await WriteHttpResponseAsync(writer, response, keepAlive, cancellationToken);
 
+                        if (metricsEnabled)
+                        {
+                            var durationMs = FlashHttpMetrics.GetElapsedMilliseconds(startTs);
+                            FlashHttpMetrics.RecordRequest(
+                                context.Request.Method,
+                                response.StatusCode,
+                                isHttps,
+                                keepAlive,
+                                durationMs,
+                                requestBodyBytes: context.Request.Body?.Length ?? 0,
+                                responseBodyBytes: response.Body?.Length ?? 0);
+                        }
+
                         _responsePool.Return(response);
                         response = null;
 
                         _contextPool.Return(context);
                         context = null;
+                    }
+                    catch
+                    {
+                        if (metricsEnabled)
+                        {
+                            FlashHttpMetrics.RecordRequestError(request!.Method, isHttps);
+                        }
+                        throw;
                     }
                     finally
                     {

@@ -143,6 +143,11 @@ public class FlashHttpServer : IDisposable
         if (_logger.IsEnabled(LogLevel.Information))
             _logger.LogInformation("Accepted new client connection from {remoteEndPoint}", tcpClient.Client.RemoteEndPoint);
 
+        if (_options.MetricsEnabled)
+        {
+            FlashHttpMetrics.ActiveConnections.Add(1);
+        }
+
         Stream? stream = null;
 
         try
@@ -177,6 +182,7 @@ public class FlashHttpServer : IDisposable
                 stream,
                 isHttps,
                 app,
+                _options.MetricsEnabled,
                 _requestPool,
                 _responsePool,
                 _contextPool,
@@ -201,6 +207,11 @@ public class FlashHttpServer : IDisposable
             try { if (stream != null) await stream.DisposeAsync().ConfigureAwait(false); } catch { }
             try { tcpClient.Close(); } catch { }
             tcpClient.Dispose();
+
+            if (_options.MetricsEnabled)
+            {
+                FlashHttpMetrics.ActiveConnections.Add(-1);
+            }
         }
     }
 
