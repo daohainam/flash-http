@@ -197,11 +197,16 @@ internal partial class FlashHttpConnection
                             
                             // Calculate response body size
                             int responseBodyBytes;
-                            if (response.BodyStream != null)
+                            if (response.BodyStream != null && response.BodyStream.CanSeek)
                             {
-                                responseBodyBytes = response.BodyStream.CanSeek 
-                                    ? (int)Math.Min(response.BodyStream.Length - response.BodyStream.Position, int.MaxValue)
-                                    : 0;
+                                long streamLength = response.BodyStream.Length;
+                                long streamPosition = response.BodyStream.Position;
+                                long remaining = streamLength > streamPosition ? streamLength - streamPosition : 0;
+                                responseBodyBytes = (int)Math.Min(remaining, int.MaxValue);
+                            }
+                            else if (response.BodyStream != null)
+                            {
+                                responseBodyBytes = 0;
                             }
                             else
                             {
@@ -353,15 +358,30 @@ internal partial class FlashHttpConnection
         {
             // Stream the content in chunks
             const int bufferSize = 8192;
+            const int flushThreshold = 65536; // Flush after 64KB to reduce I/O calls
             byte[] buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
             try
             {
                 int bytesRead;
+                int bytesSinceLastFlush = 0;
                 while ((bytesRead = await bodyStream!.ReadAsync(buffer.AsMemory(0, bufferSize), ct)) > 0)
                 {
                     var span = writer.GetSpan(bytesRead);
                     buffer.AsSpan(0, bytesRead).CopyTo(span);
                     writer.Advance(bytesRead);
+                    bytesSinceLastFlush += bytesRead;
+                    
+                    // Flush periodically to avoid buffering too much data
+                    if (bytesSinceLastFlush >= flushThreshold)
+                    {
+                        await writer.FlushAsync(ct);
+                        bytesSinceLastFlush = 0;
+                    }
+                }
+                
+                // Final flush for any remaining data
+                if (bytesSinceLastFlush > 0)
+                {
                     await writer.FlushAsync(ct);
                 }
             }
