@@ -189,11 +189,30 @@ internal partial class FlashHttpConnection
                         _requestPool.Return(request);
                         request = null;
 
-                        await WriteHttpResponseAsync(writer, response, keepAlive, cancellationToken);
+                        keepAlive = await WriteHttpResponseAsync(writer, response, keepAlive, cancellationToken);
 
                         if (metricsEnabled)
                         {
                             var durationMs = FlashHttpMetrics.GetElapsedMilliseconds(startTs);
+                            
+                            // Calculate response body size
+                            int responseBodyBytes;
+                            if (response.BodyStream != null && response.BodyStream.CanSeek)
+                            {
+                                long streamLength = response.BodyStream.Length;
+                                long streamPosition = response.BodyStream.Position;
+                                long remaining = streamLength > streamPosition ? streamLength - streamPosition : 0;
+                                responseBodyBytes = (int)Math.Min(remaining, int.MaxValue);
+                            }
+                            else if (response.BodyStream != null)
+                            {
+                                responseBodyBytes = 0;
+                            }
+                            else
+                            {
+                                responseBodyBytes = response.Body?.Length ?? 0;
+                            }
+                            
                             FlashHttpMetrics.RecordRequest(
                                 context.Request.Method,
                                 response.StatusCode,
@@ -201,7 +220,7 @@ internal partial class FlashHttpConnection
                                 keepAlive,
                                 durationMs,
                                 requestBodyBytes: context.Request.Body?.Length ?? 0,
-                                responseBodyBytes: response.Body?.Length ?? 0);
+                                responseBodyBytes: responseBodyBytes);
                         }
 
                         _responsePool.Return(response);
@@ -259,13 +278,37 @@ internal partial class FlashHttpConnection
         await reader.CompleteAsync();
     }
 
-    private static async ValueTask WriteHttpResponseAsync(
+    private static async ValueTask<bool> WriteHttpResponseAsync(
     PipeWriter writer,
     FlashHttpResponse response,
     bool keepAlive,
     CancellationToken ct)
     {
-        var body = response.Body ?? Array.Empty<byte>();
+        Stream? bodyStream = response.BodyStream;
+        byte[] body = response.Body ?? Array.Empty<byte>();
+        
+        // Prefer BodyStream over Body if present
+        bool useStream = bodyStream != null;
+        long contentLength;
+        
+        if (useStream)
+        {
+            // If stream can seek, get the length; otherwise use -1 to indicate unknown
+            if (bodyStream!.CanSeek)
+            {
+                contentLength = bodyStream.Length - bodyStream.Position;
+            }
+            else
+            {
+                contentLength = -1;
+                // For unknown length streams, we can't keep connection alive
+                keepAlive = false;
+            }
+        }
+        else
+        {
+            contentLength = body.Length;
+        }
 
         // IMPORTANT: ReasonPhrase trong FlashHttpResponse hiện default là string.Empty,
         // nên dùng IsNullOrEmpty để fallback.
@@ -281,10 +324,13 @@ internal partial class FlashHttpConnection
         WriteCRLF(writer);
 
         // ---- Core headers (server-owned): always write, always correct
-        // Content-Length: <body.Length>\r\n
-        WriteBytes(writer, "Content-Length: "u8);
-        WriteInt32Ascii(writer, body.Length);
-        WriteCRLF(writer);
+        // Content-Length: <contentLength>\r\n (only if known)
+        if (contentLength >= 0)
+        {
+            WriteBytes(writer, "Content-Length: "u8);
+            WriteInt64Ascii(writer, contentLength);
+            WriteCRLF(writer);
+        }
 
         // Connection: keep-alive/close\r\n
         WriteBytes(writer, "Connection: "u8);
@@ -308,10 +354,50 @@ internal partial class FlashHttpConnection
         WriteCRLF(writer);
 
         // Body
-        if (body.Length > 0)
+        if (useStream)
+        {
+            // Stream the content in chunks
+            const int bufferSize = 8192;
+            const int flushThreshold = 65536; // Flush after 64KB to reduce I/O calls
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+            try
+            {
+                int bytesRead;
+                int bytesSinceLastFlush = 0;
+                while ((bytesRead = await bodyStream!.ReadAsync(buffer.AsMemory(0, bufferSize), ct)) > 0)
+                {
+                    var span = writer.GetSpan(bytesRead);
+                    buffer.AsSpan(0, bytesRead).CopyTo(span);
+                    writer.Advance(bytesRead);
+                    bytesSinceLastFlush += bytesRead;
+                    
+                    // Flush periodically to avoid buffering too much data
+                    if (bytesSinceLastFlush >= flushThreshold)
+                    {
+                        await writer.FlushAsync(ct);
+                        bytesSinceLastFlush = 0;
+                    }
+                }
+                
+                // Final flush for any remaining data
+                if (bytesSinceLastFlush > 0)
+                {
+                    await writer.FlushAsync(ct);
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+        else if (body.Length > 0)
+        {
             writer.Write(body);
+        }
 
         await writer.FlushAsync(ct);
+        
+        return keepAlive;
     }
 
     private static string GetReasonPhrase(int statusCode)
@@ -367,6 +453,16 @@ internal partial class FlashHttpConnection
         Span<byte> span = writer.GetSpan(11);
         if (!Utf8Formatter.TryFormat(value, span, out int written))
             throw new InvalidOperationException("Failed to format int.");
+
+        writer.Advance(written);
+    }
+
+    private static void WriteInt64Ascii(PipeWriter writer, long value)
+    {
+        // Int64.MinValue = -9223372036854775808 => 20 chars max
+        Span<byte> span = writer.GetSpan(20);
+        if (!Utf8Formatter.TryFormat(value, span, out int written))
+            throw new InvalidOperationException("Failed to format long.");
 
         writer.Advance(written);
     }

@@ -24,6 +24,8 @@ internal sealed class FlashHttpResponsePooledObjectPolicy : PooledObjectPolicy<F
         obj.StatusCode = 404;
         obj.ReasonPhrase = string.Empty;
         obj.Body = [];
+        obj.BodyStream?.Dispose();
+        obj.BodyStream = null;
         obj.Headers.Clear();
         return true;
     }
