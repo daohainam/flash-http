@@ -187,7 +187,9 @@ public class FlashHttpServer : IDisposable
                 _responsePool,
                 _contextPool,
                 _serviceProvider,
-                _logger);
+                _logger,
+                _options.MaxHeaderCount,
+                _options.MaxRequestBodySize);
 
             await connection.ProcessRequestsAsync(cancellationToken);
         }

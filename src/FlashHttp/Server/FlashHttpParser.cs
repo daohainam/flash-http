@@ -15,7 +15,9 @@ internal class FlashHttpParser
         RequestLineTooLong,
         HeaderLineTooLong,
         UnsupportedHttpVersion,
-        InvalidRequest
+        InvalidRequest,
+        TooManyHeaders,
+        RequestBodyTooLarge
     }
 
     private static ReadOnlySpan<byte> Http11Bytes => "HTTP/1.1"u8;
@@ -40,7 +42,9 @@ internal class FlashHttpParser
         bool isHttps,
         IPEndPoint? remoteEndPoint,
         IPEndPoint? localEndPoint,
-        ObjectPool<FlashHttpRequest>? requestPool)
+        ObjectPool<FlashHttpRequest>? requestPool,
+        int maxHeaderCount = 100,
+        long maxRequestBodySize = 10 * 1024 * 1024)
     {
         request = default!;
         keepAlive = true;
@@ -79,23 +83,23 @@ internal class FlashHttpParser
             if (headerLineSeq.Length == 0 || (headerLineSeq.Length == 1 && headerLineSeq.FirstSpan[0] == CR))
                 break;
 
-            // Allocate a buffer on the heap if headerLineSeq.Length > 0
-            byte[]? tmp = null;
             if (!TryParseHeaderLine(headerLineSeq, out string? name, out string? value))
             {
-                int tmpLen = (int)headerLineSeq.Length;
-                if (tmpLen > 0)
-                {
-                    tmp = new byte[tmpLen];
-                    headerLineSeq.CopyTo(tmp);
-                }
-                if (tmp == null || tmp.Length == 0 || (tmp.Length == 1 && tmp[0] == CR))
+                // If header parsing fails, check if it's just an empty line
+                if (headerLineSeq.Length <= 1)
                     break;
 
+                // Otherwise, skip the malformed header and continue
                 continue;
             }
 
             headers.Add(new HttpHeader(name!, value!));
+
+            // Check if we've exceeded the maximum header count
+            if (headers.Count > maxHeaderCount)
+            {
+                return TryReadHttpRequestResults.TooManyHeaders;
+            }
 
             // Some headers need special handling
             if (!hasContentLength &&
@@ -104,6 +108,12 @@ internal class FlashHttpParser
                 if (!int.TryParse(value, out contentLength) || contentLength < 0)
                 {
                     throw new InvalidOperationException("Invalid Content-Length");
+                }
+
+                // Validate Content-Length is within acceptable bounds
+                if (contentLength > maxRequestBodySize)
+                {
+                    return TryReadHttpRequestResults.RequestBodyTooLarge;
                 }
 
                 hasContentLength = true;

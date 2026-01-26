@@ -27,6 +27,8 @@ internal partial class FlashHttpConnection
     private readonly IServiceProvider services;
     private readonly IServiceScopeFactory? scopeFactory;
     private readonly ILogger logger;
+    private readonly int _maxHeaderCount;
+    private readonly long _maxRequestBodySize;
 
     public FlashHttpConnection(
         TcpClient tcpClient,
@@ -38,7 +40,9 @@ internal partial class FlashHttpConnection
         ObjectPool<FlashHttpResponse> responsePool,
         ObjectPool<FlashHandlerContext> contextPool,
         IServiceProvider services,
-        ILogger logger)
+        ILogger logger,
+        int maxHeaderCount,
+        long maxRequestBodySize)
     {
         this.tcpClient = tcpClient;
         this.stream = stream;
@@ -51,12 +55,17 @@ internal partial class FlashHttpConnection
         this.services = services;
         this.scopeFactory = services.GetService<IServiceScopeFactory>();
         this.logger = logger;
+        _maxHeaderCount = maxHeaderCount;
+        _maxRequestBodySize = maxRequestBodySize;
     }
 
     internal async Task Close()
     {
-        stream.Flush();
-        await stream.DisposeAsync();
+        if (stream != null)
+        {
+            stream.Flush();
+            await stream.DisposeAsync();
+        }
     }
 
     internal async Task ProcessRequestsAsync(CancellationToken cancellationToken)
@@ -143,7 +152,9 @@ internal partial class FlashHttpConnection
                         isHttps: isHttps,
                         remoteEndPoint: tcpClient.Client.RemoteEndPoint as IPEndPoint,
                         localEndPoint: tcpClient.Client.LocalEndPoint as IPEndPoint,
-                        _requestPool
+                        _requestPool,
+                        _maxHeaderCount,
+                        _maxRequestBodySize
                         );
 
                 if (readResult == FlashHttpParser.TryReadHttpRequestResults.Incomplete)
