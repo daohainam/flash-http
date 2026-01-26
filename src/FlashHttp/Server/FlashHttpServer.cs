@@ -67,33 +67,7 @@ public class FlashHttpServer : IDisposable
 
     public FlashHttpServer WithHandler(HttpMethodsEnum method, string path, FlashRequestAsyncDelegate handler)
     {
-        switch (method)
-        {
-            case HttpMethodsEnum.Get:
-                handlerSet.OnGetHandlers[path] = handler;
-                break;
-            case HttpMethodsEnum.Post:
-                handlerSet.OnPostHandlers[path] = handler;
-                break;
-            case HttpMethodsEnum.Put:
-                handlerSet.OnPutHandlers[path] = handler;
-                break;
-            case HttpMethodsEnum.Delete:
-                handlerSet.OnDeleteHandlers[path] = handler;
-                break;
-            case HttpMethodsEnum.Head:
-                handlerSet.OnHeadHandlers[path] = handler;
-                break;
-            case HttpMethodsEnum.Patch:
-                handlerSet.OnPatchHandlers[path] = handler;
-                break;
-            case HttpMethodsEnum.Options:
-                handlerSet.OnOptionsHandlers[path] = handler;
-                break;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(method), method, null);
-        }
-
+        handlerSet.Register(method, path, handler);
         return this;
     }
 
@@ -187,7 +161,9 @@ public class FlashHttpServer : IDisposable
                 _responsePool,
                 _contextPool,
                 _serviceProvider,
-                _logger);
+                _logger,
+                _options.MaxHeaderCount,
+                _options.MaxRequestBodySize);
 
             await connection.ProcessRequestsAsync(cancellationToken);
         }

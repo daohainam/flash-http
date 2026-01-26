@@ -27,6 +27,8 @@ internal partial class FlashHttpConnection
     private readonly IServiceProvider services;
     private readonly IServiceScopeFactory? scopeFactory;
     private readonly ILogger logger;
+    private readonly int _maxHeaderCount;
+    private readonly long _maxRequestBodySize;
 
     public FlashHttpConnection(
         TcpClient tcpClient,
@@ -38,7 +40,9 @@ internal partial class FlashHttpConnection
         ObjectPool<FlashHttpResponse> responsePool,
         ObjectPool<FlashHandlerContext> contextPool,
         IServiceProvider services,
-        ILogger logger)
+        ILogger logger,
+        int maxHeaderCount,
+        long maxRequestBodySize)
     {
         this.tcpClient = tcpClient;
         this.stream = stream;
@@ -51,12 +55,17 @@ internal partial class FlashHttpConnection
         this.services = services;
         this.scopeFactory = services.GetService<IServiceScopeFactory>();
         this.logger = logger;
+        _maxHeaderCount = maxHeaderCount;
+        _maxRequestBodySize = maxRequestBodySize;
     }
 
     internal async Task Close()
     {
-        stream.Flush();
-        await stream.DisposeAsync();
+        if (stream != null)
+        {
+            stream.Flush();
+            await stream.DisposeAsync();
+        }
     }
 
     internal async Task ProcessRequestsAsync(CancellationToken cancellationToken)
@@ -143,7 +152,9 @@ internal partial class FlashHttpConnection
                         isHttps: isHttps,
                         remoteEndPoint: tcpClient.Client.RemoteEndPoint as IPEndPoint,
                         localEndPoint: tcpClient.Client.LocalEndPoint as IPEndPoint,
-                        _requestPool
+                        _requestPool,
+                        _maxHeaderCount,
+                        _maxRequestBodySize
                         );
 
                 if (readResult == FlashHttpParser.TryReadHttpRequestResults.Incomplete)
@@ -256,6 +267,33 @@ internal partial class FlashHttpConnection
                 }
                 else
                 {
+                    // Handle parsing errors with appropriate HTTP responses
+                    if (readResult == FlashHttpParser.TryReadHttpRequestResults.TooManyHeaders)
+                    {
+                        logger.LogWarning("Request rejected: Too many headers from {RemoteEndPoint}", 
+                            tcpClient.Client.RemoteEndPoint);
+                        
+                        // Send 400 Bad Request response
+                        await SendErrorResponseAsync(writer, 400, "Bad Request - Too Many Headers", cancellationToken);
+                    }
+                    else if (readResult == FlashHttpParser.TryReadHttpRequestResults.RequestBodyTooLarge)
+                    {
+                        logger.LogWarning("Request rejected: Request body too large from {RemoteEndPoint}", 
+                            tcpClient.Client.RemoteEndPoint);
+                        
+                        // Send 413 Payload Too Large response
+                        await SendErrorResponseAsync(writer, 413, "Payload Too Large", cancellationToken);
+                    }
+                    else
+                    {
+                        // Other parsing errors (RequestLineTooLong, HeaderLineTooLong, etc.)
+                        logger.LogWarning("Request rejected: Invalid request ({Result}) from {RemoteEndPoint}", 
+                            readResult, tcpClient.Client.RemoteEndPoint);
+                        
+                        // Send 400 Bad Request response
+                        await SendErrorResponseAsync(writer, 400, "Bad Request", cancellationToken);
+                    }
+                    
                     keepAlive = false;
                 }
 
@@ -465,6 +503,42 @@ internal partial class FlashHttpConnection
             throw new InvalidOperationException("Failed to format long.");
 
         writer.Advance(written);
+    }
+
+    private static async ValueTask SendErrorResponseAsync(
+        PipeWriter writer,
+        int statusCode,
+        string message,
+        CancellationToken ct)
+    {
+        byte[] body = Encoding.UTF8.GetBytes(message);
+        
+        // Status line: HTTP/1.1 <status> <message>\r\n
+        WriteBytes(writer, Http11Bytes);
+        WriteInt32Ascii(writer, statusCode);
+        WriteAscii(writer, " ");
+        WriteAscii(writer, message);
+        WriteCRLF(writer);
+        
+        // Content-Length header
+        WriteBytes(writer, "Content-Length: "u8);
+        WriteInt64Ascii(writer, body.Length);
+        WriteCRLF(writer);
+        
+        // Connection: close header
+        WriteBytes(writer, "Connection: close"u8);
+        WriteCRLF(writer);
+        
+        // End of headers
+        WriteCRLF(writer);
+        
+        // Body
+        if (body.Length > 0)
+        {
+            writer.Write(body);
+        }
+        
+        await writer.FlushAsync(ct);
     }
 
 }

@@ -51,7 +51,7 @@ public class FlashHttpRequest
         RemoteAddress = null;
         RemotePort = 0;
         HttpVersion = HttpVersions.Http11;
-        Headers = default!;
-        Body = default!;
+        Headers?.Clear();
+        Body = [];
     }
 }
