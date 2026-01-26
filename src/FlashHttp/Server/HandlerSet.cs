@@ -30,12 +30,48 @@ public sealed class HandlerSet
     private readonly Dictionary<string, FlashRequestAsyncDelegate> _onOptionsHandlers = [];
 
     // Public readonly access for backward compatibility
+    // WARNING: Direct modifications to these dictionaries bypass thread safety.
+    // Use the Register() method for thread-safe handler registration.
+    /// <summary>
+    /// Gets the dictionary of GET handlers. For thread-safe registration, use Register() method.
+    /// </summary>
+    [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
     public Dictionary<string, FlashRequestAsyncDelegate> OnGetHandlers => _onGetHandlers;
+    
+    /// <summary>
+    /// Gets the dictionary of POST handlers. For thread-safe registration, use Register() method.
+    /// </summary>
+    [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
     public Dictionary<string, FlashRequestAsyncDelegate> OnPostHandlers => _onPostHandlers;
+    
+    /// <summary>
+    /// Gets the dictionary of PUT handlers. For thread-safe registration, use Register() method.
+    /// </summary>
+    [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
     public Dictionary<string, FlashRequestAsyncDelegate> OnPutHandlers => _onPutHandlers;
+    
+    /// <summary>
+    /// Gets the dictionary of DELETE handlers. For thread-safe registration, use Register() method.
+    /// </summary>
+    [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
     public Dictionary<string, FlashRequestAsyncDelegate> OnDeleteHandlers => _onDeleteHandlers;
+    
+    /// <summary>
+    /// Gets the dictionary of HEAD handlers. For thread-safe registration, use Register() method.
+    /// </summary>
+    [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
     public Dictionary<string, FlashRequestAsyncDelegate> OnHeadHandlers => _onHeadHandlers;
+    
+    /// <summary>
+    /// Gets the dictionary of PATCH handlers. For thread-safe registration, use Register() method.
+    /// </summary>
+    [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
     public Dictionary<string, FlashRequestAsyncDelegate> OnPatchHandlers => _onPatchHandlers;
+    
+    /// <summary>
+    /// Gets the dictionary of OPTIONS handlers. For thread-safe registration, use Register() method.
+    /// </summary>
+    [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
     public Dictionary<string, FlashRequestAsyncDelegate> OnOptionsHandlers => _onOptionsHandlers;
 
     #region Registration helpers
@@ -55,13 +91,13 @@ public sealed class HandlerSet
     private Dictionary<string, FlashRequestAsyncDelegate> GetAsyncDictionary(HttpMethodsEnum method)
         => method switch
         {
-            HttpMethodsEnum.Get => OnGetHandlers,
-            HttpMethodsEnum.Post => OnPostHandlers,
-            HttpMethodsEnum.Put => OnPutHandlers,
-            HttpMethodsEnum.Delete => OnDeleteHandlers,
-            HttpMethodsEnum.Head => OnHeadHandlers,
-            HttpMethodsEnum.Patch => OnPatchHandlers,
-            HttpMethodsEnum.Options => OnOptionsHandlers,
+            HttpMethodsEnum.Get => _onGetHandlers,
+            HttpMethodsEnum.Post => _onPostHandlers,
+            HttpMethodsEnum.Put => _onPutHandlers,
+            HttpMethodsEnum.Delete => _onDeleteHandlers,
+            HttpMethodsEnum.Head => _onHeadHandlers,
+            HttpMethodsEnum.Patch => _onPatchHandlers,
+            HttpMethodsEnum.Options => _onOptionsHandlers,
             _ => throw new ArgumentOutOfRangeException(nameof(method), method, "Unsupported HTTP method")
         };
 

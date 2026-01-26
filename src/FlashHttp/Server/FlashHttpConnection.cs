@@ -267,6 +267,33 @@ internal partial class FlashHttpConnection
                 }
                 else
                 {
+                    // Handle parsing errors with appropriate HTTP responses
+                    if (readResult == FlashHttpParser.TryReadHttpRequestResults.TooManyHeaders)
+                    {
+                        logger.LogWarning("Request rejected: Too many headers from {RemoteEndPoint}", 
+                            tcpClient.Client.RemoteEndPoint);
+                        
+                        // Send 400 Bad Request response
+                        await SendErrorResponseAsync(writer, 400, "Bad Request - Too Many Headers", cancellationToken);
+                    }
+                    else if (readResult == FlashHttpParser.TryReadHttpRequestResults.RequestBodyTooLarge)
+                    {
+                        logger.LogWarning("Request rejected: Request body too large from {RemoteEndPoint}", 
+                            tcpClient.Client.RemoteEndPoint);
+                        
+                        // Send 413 Payload Too Large response
+                        await SendErrorResponseAsync(writer, 413, "Payload Too Large", cancellationToken);
+                    }
+                    else
+                    {
+                        // Other parsing errors (RequestLineTooLong, HeaderLineTooLong, etc.)
+                        logger.LogWarning("Request rejected: Invalid request ({Result}) from {RemoteEndPoint}", 
+                            readResult, tcpClient.Client.RemoteEndPoint);
+                        
+                        // Send 400 Bad Request response
+                        await SendErrorResponseAsync(writer, 400, "Bad Request", cancellationToken);
+                    }
+                    
                     keepAlive = false;
                 }
 
@@ -476,6 +503,42 @@ internal partial class FlashHttpConnection
             throw new InvalidOperationException("Failed to format long.");
 
         writer.Advance(written);
+    }
+
+    private static async ValueTask SendErrorResponseAsync(
+        PipeWriter writer,
+        int statusCode,
+        string message,
+        CancellationToken ct)
+    {
+        byte[] body = Encoding.UTF8.GetBytes(message);
+        
+        // Status line: HTTP/1.1 <status> <message>\r\n
+        WriteBytes(writer, Http11Bytes);
+        WriteInt32Ascii(writer, statusCode);
+        WriteAscii(writer, " ");
+        WriteAscii(writer, message);
+        WriteCRLF(writer);
+        
+        // Content-Length header
+        WriteBytes(writer, "Content-Length: "u8);
+        WriteInt64Ascii(writer, body.Length);
+        WriteCRLF(writer);
+        
+        // Connection: close header
+        WriteBytes(writer, "Connection: close"u8);
+        WriteCRLF(writer);
+        
+        // End of headers
+        WriteCRLF(writer);
+        
+        // Body
+        if (body.Length > 0)
+        {
+            writer.Write(body);
+        }
+        
+        await writer.FlushAsync(ct);
     }
 
 }
