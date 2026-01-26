@@ -11,6 +11,7 @@ namespace FlashHttp.Server;
 /// Central registry for HTTP route handlers.
 /// Supports both synchronous and asynchronous handlers while remaining
 /// backwards compatible with the original sync-only design.
+/// Thread-safe for concurrent registration and dispatch.
 /// </summary>
 public sealed class HandlerSet
 {
@@ -19,13 +20,23 @@ public sealed class HandlerSet
         IFlashHandlerContext context,
         CancellationToken cancellationToken);
 
-    public readonly Dictionary<string, FlashRequestAsyncDelegate> OnGetHandlers = [];
-    public readonly Dictionary<string, FlashRequestAsyncDelegate> OnPostHandlers = [];
-    public readonly Dictionary<string, FlashRequestAsyncDelegate> OnPutHandlers = [];
-    public readonly Dictionary<string, FlashRequestAsyncDelegate> OnDeleteHandlers = [];
-    public readonly Dictionary<string, FlashRequestAsyncDelegate> OnHeadHandlers = [];
-    public readonly Dictionary<string, FlashRequestAsyncDelegate> OnPatchHandlers = [];
-    public readonly Dictionary<string, FlashRequestAsyncDelegate> OnOptionsHandlers = [];
+    private readonly object _lock = new object();
+    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onGetHandlers = [];
+    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onPostHandlers = [];
+    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onPutHandlers = [];
+    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onDeleteHandlers = [];
+    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onHeadHandlers = [];
+    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onPatchHandlers = [];
+    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onOptionsHandlers = [];
+
+    // Public readonly access for backward compatibility
+    public Dictionary<string, FlashRequestAsyncDelegate> OnGetHandlers => _onGetHandlers;
+    public Dictionary<string, FlashRequestAsyncDelegate> OnPostHandlers => _onPostHandlers;
+    public Dictionary<string, FlashRequestAsyncDelegate> OnPutHandlers => _onPutHandlers;
+    public Dictionary<string, FlashRequestAsyncDelegate> OnDeleteHandlers => _onDeleteHandlers;
+    public Dictionary<string, FlashRequestAsyncDelegate> OnHeadHandlers => _onHeadHandlers;
+    public Dictionary<string, FlashRequestAsyncDelegate> OnPatchHandlers => _onPatchHandlers;
+    public Dictionary<string, FlashRequestAsyncDelegate> OnOptionsHandlers => _onOptionsHandlers;
 
     #region Registration helpers
 
@@ -34,8 +45,11 @@ public sealed class HandlerSet
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(handler);
 
-        var dict = GetAsyncDictionary(method);
-        dict[path] = handler;
+        lock (_lock)
+        {
+            var dict = GetAsyncDictionary(method);
+            dict[path] = handler;
+        }
     }
 
     private Dictionary<string, FlashRequestAsyncDelegate> GetAsyncDictionary(HttpMethodsEnum method)
@@ -57,34 +71,26 @@ public sealed class HandlerSet
 
     public ValueTask HandleAsync(IFlashHandlerContext context, CancellationToken cancellationToken)
     {
-        Dictionary<string, FlashRequestAsyncDelegate>? asyncHandlers = null;
+        FlashRequestAsyncDelegate? asyncHandler = null;
 
-        switch (context.Request.Method)
+        lock (_lock)
         {
-            case HttpMethodsEnum.Get:
-                asyncHandlers = OnGetHandlers;
-                break;
-            case HttpMethodsEnum.Post:
-                asyncHandlers = OnPostHandlers;
-                break;
-            case HttpMethodsEnum.Put:
-                asyncHandlers = OnPutHandlers;
-                break;
-            case HttpMethodsEnum.Delete:
-                asyncHandlers = OnDeleteHandlers;
-                break;
-            case HttpMethodsEnum.Head:
-                asyncHandlers = OnHeadHandlers;
-                break;
-            case HttpMethodsEnum.Patch:
-                asyncHandlers = OnPatchHandlers;
-                break;
-            case HttpMethodsEnum.Options:
-                asyncHandlers = OnOptionsHandlers;
-                break;
+            Dictionary<string, FlashRequestAsyncDelegate>? asyncHandlers = context.Request.Method switch
+            {
+                HttpMethodsEnum.Get => _onGetHandlers,
+                HttpMethodsEnum.Post => _onPostHandlers,
+                HttpMethodsEnum.Put => _onPutHandlers,
+                HttpMethodsEnum.Delete => _onDeleteHandlers,
+                HttpMethodsEnum.Head => _onHeadHandlers,
+                HttpMethodsEnum.Patch => _onPatchHandlers,
+                HttpMethodsEnum.Options => _onOptionsHandlers,
+                _ => null
+            };
+
+            asyncHandlers?.TryGetValue(context.Request.Path, out asyncHandler);
         }
 
-        if (asyncHandlers != null && asyncHandlers.TryGetValue(context.Request.Path, out var asyncHandler))
+        if (asyncHandler != null)
         {
             return asyncHandler(context, cancellationToken);
         }
