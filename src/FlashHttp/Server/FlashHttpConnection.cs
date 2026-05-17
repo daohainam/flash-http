@@ -29,6 +29,7 @@ internal partial class FlashHttpConnection
     private readonly ILogger logger;
     private readonly int _maxHeaderCount;
     private readonly long _maxRequestBodySize;
+    private readonly TimeSpan _receiveTimeout;
 
     public FlashHttpConnection(
         TcpClient tcpClient,
@@ -42,7 +43,8 @@ internal partial class FlashHttpConnection
         IServiceProvider services,
         ILogger logger,
         int maxHeaderCount,
-        long maxRequestBodySize)
+        long maxRequestBodySize,
+        TimeSpan receiveTimeout)
     {
         this.tcpClient = tcpClient;
         this.stream = stream;
@@ -57,6 +59,7 @@ internal partial class FlashHttpConnection
         this.logger = logger;
         _maxHeaderCount = maxHeaderCount;
         _maxRequestBodySize = maxRequestBodySize;
+        _receiveTimeout = receiveTimeout;
     }
 
     internal async Task Close()
@@ -77,7 +80,7 @@ internal partial class FlashHttpConnection
         var token = connectionCts.Token;
 
         // Read from stream and fill pipe
-        var reading = FillPipeAsync(stream, inputPipe.Writer, token);
+        var reading = FillPipeAsync(stream, inputPipe.Writer, _receiveTimeout, token);
 
         // Read from pipe and process requests
         var processing = ReadPipeAsync(inputPipe.Reader, outputWriter, connectionCts, token);
@@ -92,9 +95,10 @@ internal partial class FlashHttpConnection
         await outputWriter.CompleteAsync().ConfigureAwait(false);
     }
 
-    private static async Task FillPipeAsync(Stream stream, PipeWriter writer, CancellationToken cancellationToken)
+    private static async Task FillPipeAsync(Stream stream, PipeWriter writer, TimeSpan receiveTimeout, CancellationToken cancellationToken)
     {
         Exception? error = null;
+        bool applyTimeout = receiveTimeout > TimeSpan.Zero && receiveTimeout != Timeout.InfiniteTimeSpan;
         try
         {
             const int minimumBufferSize = 4096;
@@ -102,7 +106,28 @@ internal partial class FlashHttpConnection
             while (true)
             {
                 Memory<byte> memory = writer.GetMemory(minimumBufferSize);
-                int bytesRead = await stream.ReadAsync(memory, cancellationToken);
+
+                int bytesRead;
+                if (applyTimeout)
+                {
+                    // Per-read idle timeout: protects against Slowloris-style attacks where
+                    // a client holds the socket open but never (or barely) sends data.
+                    using var readCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    readCts.CancelAfter(receiveTimeout);
+                    try
+                    {
+                        bytesRead = await stream.ReadAsync(memory, readCts.Token);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        // Idle timeout — graceful close, not an error.
+                        break;
+                    }
+                }
+                else
+                {
+                    bytesRead = await stream.ReadAsync(memory, cancellationToken);
+                }
 
                 if (bytesRead == 0)
                 {
@@ -197,9 +222,6 @@ internal partial class FlashHttpConnection
 
                         await app(context, cancellationToken);
 
-                        _requestPool.Return(request);
-                        request = null;
-
                         keepAlive = await WriteHttpResponseAsync(writer, response, keepAlive, cancellationToken);
 
                         if (metricsEnabled)
@@ -267,33 +289,39 @@ internal partial class FlashHttpConnection
                 }
                 else
                 {
-                    // Handle parsing errors with appropriate HTTP responses
+                    int errorStatusCode;
+                    string errorMessage;
+
                     if (readResult == FlashHttpParser.TryReadHttpRequestResults.TooManyHeaders)
                     {
-                        logger.LogWarning("Request rejected: Too many headers from {RemoteEndPoint}", 
+                        logger.LogWarning("Request rejected: Too many headers from {RemoteEndPoint}",
                             tcpClient.Client.RemoteEndPoint);
-                        
-                        // Send 400 Bad Request response
-                        await SendErrorResponseAsync(writer, 400, "Bad Request - Too Many Headers", cancellationToken);
+                        errorStatusCode = 400;
+                        errorMessage = "Bad Request - Too Many Headers";
                     }
                     else if (readResult == FlashHttpParser.TryReadHttpRequestResults.RequestBodyTooLarge)
                     {
-                        logger.LogWarning("Request rejected: Request body too large from {RemoteEndPoint}", 
+                        logger.LogWarning("Request rejected: Request body too large from {RemoteEndPoint}",
                             tcpClient.Client.RemoteEndPoint);
-                        
-                        // Send 413 Payload Too Large response
-                        await SendErrorResponseAsync(writer, 413, "Payload Too Large", cancellationToken);
+                        errorStatusCode = 413;
+                        errorMessage = "Payload Too Large";
                     }
                     else
                     {
                         // Other parsing errors (RequestLineTooLong, HeaderLineTooLong, etc.)
-                        logger.LogWarning("Request rejected: Invalid request ({Result}) from {RemoteEndPoint}", 
+                        logger.LogWarning("Request rejected: Invalid request ({Result}) from {RemoteEndPoint}",
                             readResult, tcpClient.Client.RemoteEndPoint);
-                        
-                        // Send 400 Bad Request response
-                        await SendErrorResponseAsync(writer, 400, "Bad Request", cancellationToken);
+                        errorStatusCode = 400;
+                        errorMessage = "Bad Request";
                     }
-                    
+
+                    await SendErrorResponseAsync(writer, errorStatusCode, errorMessage, cancellationToken);
+
+                    if (metricsEnabled)
+                    {
+                        FlashHttpMetrics.RecordErrorResponse(errorStatusCode, isHttps);
+                    }
+
                     keepAlive = false;
                 }
 

@@ -26,4 +26,19 @@ public class FlashHttpServerOptions
     /// Set to prevent DoS attacks via large Content-Length values.
     /// </summary>
     public long MaxRequestBodySize { get; set; } = 10 * 1024 * 1024; // 10 MB
+
+    /// <summary>
+    /// Maximum idle time between successful reads on a connection before it is closed.
+    /// Default is 30 seconds. Use <see cref="System.Threading.Timeout.InfiniteTimeSpan"/>
+    /// to disable. Hardens against Slowloris-style attacks where a client holds the
+    /// socket open without sending data.
+    /// </summary>
+    public TimeSpan ReceiveTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Maximum time the TLS handshake (<c>AuthenticateAsServerAsync</c>) is allowed to
+    /// take. Default is 10 seconds. Use <see cref="System.Threading.Timeout.InfiniteTimeSpan"/>
+    /// to disable. Hardens against slow-handshake DoS.
+    /// </summary>
+    public TimeSpan TlsHandshakeTimeout { get; set; } = TimeSpan.FromSeconds(10);
 }

@@ -108,6 +108,7 @@ public sealed class HandlerSet
     public ValueTask HandleAsync(IFlashHandlerContext context, CancellationToken cancellationToken)
     {
         FlashRequestAsyncDelegate? asyncHandler = null;
+        string? allowHeader = null;
 
         lock (_lock)
         {
@@ -124,6 +125,13 @@ public sealed class HandlerSet
             };
 
             asyncHandlers?.TryGetValue(context.Request.Path, out asyncHandler);
+
+            // If the request method has no handler for this path, check whether some
+            // *other* method does — in which case the right response is 405, not 404.
+            if (asyncHandler is null)
+            {
+                allowHeader = BuildAllowHeaderForPath(context.Request.Path);
+            }
         }
 
         if (asyncHandler != null)
@@ -131,8 +139,47 @@ public sealed class HandlerSet
             return asyncHandler(context, cancellationToken);
         }
 
-        SetNotFound(context.Response);
+        if (allowHeader is not null)
+        {
+            SetMethodNotAllowed(context.Response, allowHeader);
+        }
+        else
+        {
+            SetNotFound(context.Response);
+        }
         return ValueTask.CompletedTask;
+    }
+
+    // Caller must hold _lock. Returns a comma-separated method list (RFC 7231 §7.4.1)
+    // or null if no method is registered for the given path.
+    private string? BuildAllowHeaderForPath(string path)
+    {
+        StringBuilder? sb = null;
+        AppendIfRegistered(_onGetHandlers, path, ref sb, "GET");
+        AppendIfRegistered(_onHeadHandlers, path, ref sb, "HEAD");
+        AppendIfRegistered(_onPostHandlers, path, ref sb, "POST");
+        AppendIfRegistered(_onPutHandlers, path, ref sb, "PUT");
+        AppendIfRegistered(_onPatchHandlers, path, ref sb, "PATCH");
+        AppendIfRegistered(_onDeleteHandlers, path, ref sb, "DELETE");
+        AppendIfRegistered(_onOptionsHandlers, path, ref sb, "OPTIONS");
+        return sb?.ToString();
+    }
+
+    private static void AppendIfRegistered(
+        Dictionary<string, FlashRequestAsyncDelegate> dict,
+        string path,
+        ref StringBuilder? sb,
+        string methodName)
+    {
+        if (!dict.ContainsKey(path)) return;
+        if (sb is null)
+        {
+            sb = new StringBuilder(methodName);
+        }
+        else
+        {
+            sb.Append(", ").Append(methodName);
+        }
     }
 
     private static void SetNotFound(FlashHttpResponse response)
@@ -140,6 +187,15 @@ public sealed class HandlerSet
         response.StatusCode = 404;
         response.ReasonPhrase = "Not Found";
         response.Body = Encoding.UTF8.GetBytes("Not Found");
+    }
+
+    private static void SetMethodNotAllowed(FlashHttpResponse response, string allowHeader)
+    {
+        response.StatusCode = 405;
+        response.ReasonPhrase = "Method Not Allowed";
+        response.Body = Encoding.UTF8.GetBytes("Method Not Allowed");
+        // RFC 7231 §6.5.5: a 405 response MUST include an Allow header.
+        response.Headers.Add(new HttpHeader("Allow", allowHeader));
     }
 
     #endregion

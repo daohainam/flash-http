@@ -110,4 +110,50 @@ public sealed class HandlerSetTests
 
         Assert.Equal(404, ctx.Response.StatusCode);
     }
+
+    [Fact]
+    public async Task HandleAsync_PathRegisteredForDifferentMethod_Returns405WithAllow()
+    {
+        var set = new HandlerSet();
+        set.Register(HttpMethodsEnum.Post, "/route", static (_, _) => ValueTask.CompletedTask);
+
+        var ctx = CreateContext(HttpMethodsEnum.Get, "/route");
+        await set.HandleAsync(ctx, CancellationToken.None);
+
+        Assert.Equal(405, ctx.Response.StatusCode);
+        Assert.Equal("Method Not Allowed", ctx.Response.ReasonPhrase);
+        var allow = Assert.Single(ctx.Response.Headers, h => h.Name == "Allow");
+        Assert.Equal("POST", allow.Value);
+    }
+
+    [Fact]
+    public async Task HandleAsync_PathRegisteredForMultipleMethods_AllowListsAllInCanonicalOrder()
+    {
+        var set = new HandlerSet();
+        // Register in arbitrary order — the Allow header should still come back in the
+        // canonical method order baked into BuildAllowHeaderForPath.
+        set.Register(HttpMethodsEnum.Delete, "/route", static (_, _) => ValueTask.CompletedTask);
+        set.Register(HttpMethodsEnum.Get, "/route", static (_, _) => ValueTask.CompletedTask);
+        set.Register(HttpMethodsEnum.Post, "/route", static (_, _) => ValueTask.CompletedTask);
+
+        var ctx = CreateContext(HttpMethodsEnum.Put, "/route");
+        await set.HandleAsync(ctx, CancellationToken.None);
+
+        Assert.Equal(405, ctx.Response.StatusCode);
+        var allow = Assert.Single(ctx.Response.Headers, h => h.Name == "Allow");
+        Assert.Equal("GET, POST, DELETE", allow.Value);
+    }
+
+    [Fact]
+    public async Task HandleAsync_PathNotRegisteredAnywhere_Returns404()
+    {
+        var set = new HandlerSet();
+        set.Register(HttpMethodsEnum.Get, "/known", static (_, _) => ValueTask.CompletedTask);
+
+        var ctx = CreateContext(HttpMethodsEnum.Get, "/unknown");
+        await set.HandleAsync(ctx, CancellationToken.None);
+
+        Assert.Equal(404, ctx.Response.StatusCode);
+        Assert.DoesNotContain(ctx.Response.Headers, h => h.Name == "Allow");
+    }
 }

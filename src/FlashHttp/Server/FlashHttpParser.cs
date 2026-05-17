@@ -85,32 +85,36 @@ internal class FlashHttpParser
 
             if (!TryParseHeaderLine(headerLineSeq, out string? name, out string? value))
             {
-                // If header parsing fails, check if it's just an empty line
+                // Defensive empty-line edge case; the real end-of-headers check is above.
                 if (headerLineSeq.Length <= 1)
                     break;
 
-                // Otherwise, skip the malformed header and continue
-                continue;
+                // RFC 7230 §3.2.4: malformed header (no colon) must be rejected, not skipped.
+                return TryReadHttpRequestResults.InvalidRequest;
             }
 
-            headers.Add(new HttpHeader(name!, value!));
-
-            // Check if we've exceeded the maximum header count
-            if (headers.Count > maxHeaderCount)
+            // Enforce header limit BEFORE adding to avoid an off-by-one and a wasted alloc.
+            if (headers.Count >= maxHeaderCount)
             {
                 return TryReadHttpRequestResults.TooManyHeaders;
             }
 
+            headers.Add(new HttpHeader(name!, value!));
+
             // Some headers need special handling
-            if (!hasContentLength &&
-                name!.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
+            if (name!.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
             {
-                if (!int.TryParse(value, out contentLength) || contentLength < 0)
+                // RFC 7230 §3.3.3: duplicate Content-Length is the canonical CL.CL smuggling vector.
+                if (hasContentLength)
                 {
-                    throw new InvalidOperationException("Invalid Content-Length");
+                    return TryReadHttpRequestResults.InvalidRequest;
                 }
 
-                // Validate Content-Length is within acceptable bounds
+                if (!int.TryParse(value, out contentLength) || contentLength < 0)
+                {
+                    return TryReadHttpRequestResults.InvalidRequest;
+                }
+
                 if (contentLength > maxRequestBodySize)
                 {
                     return TryReadHttpRequestResults.RequestBodyTooLarge;
@@ -249,6 +253,18 @@ internal class FlashHttpParser
 
         ReadOnlySpan<byte> methodSpan = line[..firstSpace];
         ReadOnlySpan<byte> pathSpan = line.Slice(firstSpace + 1, secondSpace - firstSpace - 1);
+
+        // RFC 3986: control characters (and DEL) are not permitted in a request-target.
+        // Allowing them risks log injection and downstream string-handling confusion.
+        if (ContainsControlChar(pathSpan))
+        {
+            method = HttpMethodsEnum.Get;
+            path = "";
+            queryString = "";
+            version = HttpVersions.Unknown;
+            return false;
+        }
+
         int queryIndex = pathSpan.IndexOf((byte)'?');
         ReadOnlySpan<byte> versionSpan = line[(secondSpace + 1)..];
 
@@ -384,4 +400,14 @@ internal class FlashHttpParser
     private static bool IsSpace(byte b)
         => b == (byte)' ' || b == (byte)'\t';
 
+    private static bool ContainsControlChar(ReadOnlySpan<byte> span)
+    {
+        for (int i = 0; i < span.Length; i++)
+        {
+            byte b = span[i];
+            if (b < 0x20 || b == 0x7F)
+                return true;
+        }
+        return false;
+    }
 }

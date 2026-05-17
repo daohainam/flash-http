@@ -135,6 +135,64 @@ public sealed class MetricsTests
         try { await startTask; } catch (OperationCanceledException) { }
     }
 
+    [Fact]
+    public async Task Metrics_RecordsParsingErrorResponses()
+    {
+        var options = new FlashHttpServerOptions { Address = IPAddress.Loopback, Port = 0, MetricsEnabled = true };
+        using var server = new FlashHttpServer(options, new ServiceCollection().BuildServiceProvider());
+
+        server.WithHandler(HttpMethodsEnum.Get, "/", static (_, _) => ValueTask.CompletedTask);
+
+        long errorStatusRequests = 0;
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (instrument.Meter.Name == "FlashHttp.Server" && instrument.Name == "flashhttp.server.requests")
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, measurement, tags, state) =>
+        {
+            foreach (var tag in tags)
+            {
+                if (tag.Key == "http.status_code" && tag.Value is int sc && (sc == 400 || sc == 413))
+                {
+                    errorStatusRequests += measurement;
+                }
+            }
+        });
+        listener.Start();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var startTask = Task.Run(() => server.StartAsync(cts.Token), cts.Token);
+        var port = await TestPortAccessor.WaitForBoundPortAsync(server, cts.Token);
+
+        // Raw TCP — send a header without a colon, which the parser now rejects as 400.
+        using var tcp = new System.Net.Sockets.TcpClient();
+        await tcp.ConnectAsync(IPAddress.Loopback, port, cts.Token);
+        var stream = tcp.GetStream();
+        var malformed = Encoding.ASCII.GetBytes("GET / HTTP/1.1\r\nBadHeaderNoColon\r\n\r\n");
+        await stream.WriteAsync(malformed, cts.Token);
+
+        // Drain the 400 response so the server-side write completes before we sample.
+        var buf = new byte[1024];
+        _ = await stream.ReadAsync(buf, cts.Token);
+
+        await Task.Delay(50, cts.Token);
+
+        Assert.True(errorStatusRequests >= 1, $"Expected at least one 4xx-tagged request emission; saw {errorStatusRequests}.");
+
+        // Close client side and give the server's connection-finally (which decrements
+        // the active_connections counter) time to run before this test returns. Without
+        // this, a stale -1 leaks into the next test's MeterListener and breaks delta math.
+        tcp.Close();
+        cts.Cancel();
+        try { await startTask; } catch (OperationCanceledException) { }
+        await Task.Delay(200, CancellationToken.None);
+    }
+
     // NOTE: Metrics are process-wide and other tests in the same run can emit measurements.
     // A reliable negative test ("disabled emits nothing") would require runtime filtering by connection/request identity,
     // which System.Diagnostics.Metrics does not provide out-of-the-box.

@@ -56,33 +56,71 @@ internal static class FlashHttpMetrics
         int requestBodyBytes,
         int responseBodyBytes)
     {
-        TagList tags = new();
-        tags.Add("http.method", MethodToTagValue(method));
-        tags.Add("http.status_code", statusCode);
-        tags.Add("net.transport", "ip_tcp");
-        tags.Add("url.scheme", isHttps ? "https" : "http");
-        tags.Add("http.keep_alive", keepAlive);
-
-        RequestsTotal.Add(1, tags);
-        RequestDurationMs.Record(durationMs, tags);
-
-        if (requestBodyBytes > 0)
+        // Metrics are observability, not control flow — a misbehaving listener must
+        // never bring down the connection handler.
+        try
         {
-            RequestBodyBytesTotal.Add(requestBodyBytes, tags);
-        }
+            TagList tags = new();
+            tags.Add("http.method", MethodToTagValue(method));
+            tags.Add("http.status_code", statusCode);
+            tags.Add("net.transport", "ip_tcp");
+            tags.Add("url.scheme", isHttps ? "https" : "http");
+            tags.Add("http.keep_alive", keepAlive);
 
-        if (responseBodyBytes > 0)
-        {
-            ResponseBytesTotal.Add(responseBodyBytes, tags);
+            RequestsTotal.Add(1, tags);
+            RequestDurationMs.Record(durationMs, tags);
+
+            if (requestBodyBytes > 0)
+            {
+                RequestBodyBytesTotal.Add(requestBodyBytes, tags);
+            }
+
+            if (responseBodyBytes > 0)
+            {
+                ResponseBytesTotal.Add(responseBodyBytes, tags);
+            }
         }
+        catch { }
     }
 
     internal static void RecordRequestError(HttpMethodsEnum method, bool isHttps)
     {
-        TagList tags = new();
-        tags.Add("http.method", MethodToTagValue(method));
-        tags.Add("url.scheme", isHttps ? "https" : "http");
-        RequestErrorsTotal.Add(1, tags);
+        try
+        {
+            TagList tags = new();
+            tags.Add("http.method", MethodToTagValue(method));
+            tags.Add("url.scheme", isHttps ? "https" : "http");
+            RequestErrorsTotal.Add(1, tags);
+        }
+        catch { }
+    }
+
+    // Records a request that failed to parse (400/413). The method is unknown at this
+    // point — observability needs the status code and scheme far more than the method.
+    internal static void RecordErrorResponse(int statusCode, bool isHttps)
+    {
+        try
+        {
+            TagList tags = new();
+            tags.Add("http.method", "UNKNOWN");
+            tags.Add("http.status_code", statusCode);
+            tags.Add("net.transport", "ip_tcp");
+            tags.Add("url.scheme", isHttps ? "https" : "http");
+            tags.Add("http.keep_alive", false);
+
+            RequestsTotal.Add(1, tags);
+        }
+        catch { }
+    }
+
+    internal static void IncrementActiveConnections()
+    {
+        try { ActiveConnections.Add(1); } catch { }
+    }
+
+    internal static void DecrementActiveConnections()
+    {
+        try { ActiveConnections.Add(-1); } catch { }
     }
 
     private static string MethodToTagValue(HttpMethodsEnum method)

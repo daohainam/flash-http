@@ -102,21 +102,20 @@ public sealed class FlashHttpParserTests
     }
 
     [Fact]
-    public void TryReadHttpRequest_InvalidContentLength_Throws()
+    public void TryReadHttpRequest_InvalidContentLength_ReturnsInvalidRequest()
     {
         var buffer = Seq("GET / HTTP/1.1\r\nContent-Length: -1\r\n\r\n");
 
-        Assert.Throws<InvalidOperationException>(() =>
-        {
-            _ = FlashHttpParser.TryReadHttpRequest(
-                ref buffer,
-                out _,
-                out _,
-                isHttps: false,
-                remoteEndPoint: null,
-                localEndPoint: null,
-                requestPool: null);
-        });
+        var r = FlashHttpParser.TryReadHttpRequest(
+            ref buffer,
+            out _,
+            out _,
+            isHttps: false,
+            remoteEndPoint: null,
+            localEndPoint: null,
+            requestPool: null);
+
+        Assert.Equal(FlashHttpParser.TryReadHttpRequestResults.InvalidRequest, r);
     }
 
     [Fact]
@@ -178,8 +177,10 @@ public sealed class FlashHttpParserTests
     }
 
     [Fact]
-    public void TryReadHttpRequest_IgnoresInvalidHeaderLines_AndStopsOnCROnly()
+    public void TryReadHttpRequest_RejectsHeaderWithoutColon()
     {
+        // RFC 7230 §3.2.4: a header line without ':' is malformed; we reject rather than skip
+        // to avoid masking smuggling/injection attempts.
         var buffer = Seq(
             "GET / HTTP/1.1\r\n" +
             "BadHeaderWithoutColon\r\n" +
@@ -187,14 +188,13 @@ public sealed class FlashHttpParserTests
 
         var r = FlashHttpParser.TryReadHttpRequest(
             ref buffer,
-            out var req,
+            out _,
             out _,
             isHttps: false,
             remoteEndPoint: null,
             localEndPoint: null,
             requestPool: null);
 
-        Assert.Equal(FlashHttpParser.TryReadHttpRequestResults.Success, r);
-        Assert.Empty(req.Headers);
+        Assert.Equal(FlashHttpParser.TryReadHttpRequestResults.InvalidRequest, r);
     }
 }

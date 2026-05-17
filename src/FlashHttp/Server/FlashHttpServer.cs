@@ -26,6 +26,7 @@ public class FlashHttpServer : IDisposable
 
     private readonly FlashPipelineBuilder _globalPipeline = new();
     private FlashRequestAsyncDelegate? _app;
+    private int _started; // 0 = not started, 1 = started; guards one-time pipeline build
 
     public FlashHttpServer(FlashHttpServerOptions options, IServiceProvider serviceProvider, ILogger? logger = null)
     {
@@ -61,6 +62,12 @@ public class FlashHttpServer : IDisposable
 
     public FlashHttpServer Use(FlashMiddleware middleware)
     {
+        ArgumentNullException.ThrowIfNull(middleware);
+        // Adding middleware after StartAsync would silently fail to apply to already-built
+        // pipeline — fail loudly instead so users can fix their wiring.
+        if (Volatile.Read(ref _started) != 0)
+            throw new InvalidOperationException("Use(...) must be called before StartAsync.");
+
         _globalPipeline.Use(middleware);
         return this;
     }
@@ -73,7 +80,12 @@ public class FlashHttpServer : IDisposable
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
-        _app ??= _globalPipeline.Build(handlerSet.HandleAsync);
+        // One-shot start: atomic CAS guarantees the pipeline is built exactly once
+        // even if StartAsync is called concurrently.
+        if (Interlocked.CompareExchange(ref _started, 1, 0) != 0)
+            throw new InvalidOperationException("StartAsync has already been called.");
+
+        _app = _globalPipeline.Build(handlerSet.HandleAsync);
 
         if (_logger.IsEnabled(LogLevel.Information))
         {
@@ -99,13 +111,28 @@ public class FlashHttpServer : IDisposable
                 }
                 break;
             }
+            catch (ObjectDisposedException)
+            {
+                // Listener was disposed via StopAsync — exit cleanly.
+                break;
+            }
             catch (Exception ex)
             {
+                // Transient errors (FD exhaustion, single-client socket faults) must not
+                // permanently stop the listener — log and back off briefly, then retry.
                 if (_logger.IsEnabled(LogLevel.Error))
                 {
-                    _logger.LogError(ex, "Error accepting client socket on {address}:{port}", _options.Address, _options.Port);
+                    _logger.LogError(ex, "Transient error accepting client socket on {address}:{port}; retrying", _options.Address, _options.Port);
                 }
-                break;
+
+                try
+                {
+                    await Task.Delay(100, cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
             }
         }
 
@@ -119,7 +146,7 @@ public class FlashHttpServer : IDisposable
 
         if (_options.MetricsEnabled)
         {
-            FlashHttpMetrics.ActiveConnections.Add(1);
+            FlashHttpMetrics.IncrementActiveConnections();
         }
 
         Stream? stream = null;
@@ -132,7 +159,7 @@ public class FlashHttpServer : IDisposable
             {
                 var sslStream = new SslStream(stream);
 
-                SslServerAuthenticationOptions options = new()
+                SslServerAuthenticationOptions sslOptions = new()
                 {
                     ApplicationProtocols =
                     [
@@ -143,19 +170,38 @@ public class FlashHttpServer : IDisposable
                     ClientCertificateRequired = false,
                 };
 
-                await sslStream.AuthenticateAsServerAsync(options, cancellationToken);
+                var handshakeTimeout = _options.TlsHandshakeTimeout;
+                if (handshakeTimeout > TimeSpan.Zero && handshakeTimeout != Timeout.InfiniteTimeSpan)
+                {
+                    using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    handshakeCts.CancelAfter(handshakeTimeout);
+                    try
+                    {
+                        await sslStream.AuthenticateAsServerAsync(sslOptions, handshakeCts.Token);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        // Slow / abandoned handshake — normal attacker/scanner behavior, not an error.
+                        if (_logger.IsEnabled(LogLevel.Information))
+                            _logger.LogInformation("TLS handshake timed out for {remoteEndPoint}", tcpClient.Client.RemoteEndPoint);
+                        return;
+                    }
+                }
+                else
+                {
+                    await sslStream.AuthenticateAsServerAsync(sslOptions, cancellationToken);
+                }
 
                 stream = sslStream;
                 isHttps = true;
             }
 
-            var app = _app ?? _globalPipeline.Build(handlerSet.HandleAsync);
-
+            // _app is guaranteed non-null here: StartAsync builds it before accepting connections.
             var connection = new FlashHttpConnection(
                 tcpClient,
                 stream,
                 isHttps,
-                app,
+                _app!,
                 _options.MetricsEnabled,
                 _requestPool,
                 _responsePool,
@@ -163,7 +209,8 @@ public class FlashHttpServer : IDisposable
                 _serviceProvider,
                 _logger,
                 _options.MaxHeaderCount,
-                _options.MaxRequestBodySize);
+                _options.MaxRequestBodySize,
+                _options.ReceiveTimeout);
 
             await connection.ProcessRequestsAsync(cancellationToken);
         }
@@ -186,7 +233,7 @@ public class FlashHttpServer : IDisposable
 
             if (_options.MetricsEnabled)
             {
-                FlashHttpMetrics.ActiveConnections.Add(-1);
+                FlashHttpMetrics.DecrementActiveConnections();
             }
         }
     }
