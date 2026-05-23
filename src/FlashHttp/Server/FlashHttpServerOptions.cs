@@ -41,4 +41,11 @@ public class FlashHttpServerOptions
     /// to disable. Hardens against slow-handshake DoS.
     /// </summary>
     public TimeSpan TlsHandshakeTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Maximum number of concurrent connections the server will accept.
+    /// Default is 0 (unlimited). When reached, new connections will wait until
+    /// an existing connection is closed.
+    /// </summary>
+    public int MaxConcurrentConnections { get; set; } = 0;
 }

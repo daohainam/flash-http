@@ -38,13 +38,13 @@ internal static class FlashHttpMetrics
     internal static readonly Counter<long> ResponseBytesTotal =
         Meter.CreateCounter<long>(
             name: "flashhttp.server.response.bytes",
-            unit: "By",
+            unit: "{By}",
             description: "Total number of response body bytes written.");
 
     internal static readonly Counter<long> RequestBodyBytesTotal =
         Meter.CreateCounter<long>(
             name: "flashhttp.server.request.body.bytes",
-            unit: "By",
+            unit: "{By}",
             description: "Total number of request body bytes received.");
 
     internal static void RecordRequest(
