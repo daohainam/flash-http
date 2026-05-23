@@ -15,6 +15,7 @@ namespace FlashHttp.Server;
 internal partial class FlashHttpConnection
 {
     private static readonly byte[] Http11Bytes = Encoding.ASCII.GetBytes("HTTP/1.1 ");
+    private static readonly PipeOptions InputPipeOptions = new(pauseWriterThreshold: 65536, resumeWriterThreshold: 32768);
 
     private readonly TcpClient tcpClient;
     private readonly Stream stream;
@@ -77,8 +78,7 @@ internal partial class FlashHttpConnection
 
     internal async Task ProcessRequestsAsync(CancellationToken cancellationToken)
     {
-        var pipeOptions = new PipeOptions(pauseWriterThreshold: 65536, resumeWriterThreshold: 32768);
-        var inputPipe = new Pipe(pipeOptions);
+        var inputPipe = new Pipe(InputPipeOptions);
         var outputWriter = PipeWriter.Create(stream);
 
         using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -273,7 +273,7 @@ internal partial class FlashHttpConnection
                         {
                             FlashHttpMetrics.RecordRequestError(request!.Method, isHttps);
                         }
-                        response?.BodyStream?.Dispose();
+                        try { response?.BodyStream?.Dispose(); } catch { }
                         throw;
                     }
                     finally
