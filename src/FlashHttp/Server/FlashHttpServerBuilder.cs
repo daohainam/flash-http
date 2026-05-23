@@ -7,6 +7,7 @@ namespace FlashHttp.Server;
 public class FlashHttpServerBuilder
 {
     private readonly FlashHttpServerOptions _options;
+    private readonly IServiceCollection _services = new ServiceCollection();
     private ILogger? _logger;
 
     private FlashHttpServerBuilder()
@@ -24,7 +25,7 @@ public class FlashHttpServerBuilder
     public static FlashHttpServerBuilder CreateBuilder(FlashHttpServerOptions options)
         => new(options);
 
-    public IServiceCollection Services => new ServiceCollection();
+    public IServiceCollection Services => _services;
 
     public FlashHttpServerBuilder ConfigureOptions(Action<FlashHttpServerOptions> configureOptions)
     {
@@ -34,7 +35,7 @@ public class FlashHttpServerBuilder
 
     public FlashHttpServer Build()
     {
-        return new FlashHttpServer(_options, Services.BuildServiceProvider(), _logger);
+        return new FlashHttpServer(_options, _services.BuildServiceProvider(), _logger);
     }
 
     public FlashHttpServerBuilder UseOptions(FlashHttpServerOptions options)

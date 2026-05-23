@@ -23,6 +23,7 @@ public class FlashHttpServer : IDisposable
 
     private readonly HandlerSet handlerSet = new();
     private TcpListener? listener;
+    private SemaphoreSlim? _connectionThrottle;
 
     private readonly FlashPipelineBuilder _globalPipeline = new();
     private FlashRequestAsyncDelegate? _app;
@@ -87,6 +88,11 @@ public class FlashHttpServer : IDisposable
 
         _app = _globalPipeline.Build(handlerSet.HandleAsync);
 
+        if (_options.MaxConcurrentConnections > 0)
+        {
+            _connectionThrottle = new SemaphoreSlim(_options.MaxConcurrentConnections, _options.MaxConcurrentConnections);
+        }
+
         if (_logger.IsEnabled(LogLevel.Information))
         {
             _logger.LogInformation("Starting listening on {address}:{port}", _options.Address, _options.Port);
@@ -141,100 +147,112 @@ public class FlashHttpServer : IDisposable
 
     private async Task HandleNewClientConnectionAsync(TcpClient tcpClient, CancellationToken cancellationToken)
     {
-        if (_logger.IsEnabled(LogLevel.Information))
-            _logger.LogInformation("Accepted new client connection from {remoteEndPoint}", tcpClient.Client.RemoteEndPoint);
-
-        if (_options.MetricsEnabled)
+        if (_connectionThrottle != null)
         {
-            FlashHttpMetrics.IncrementActiveConnections();
+            await _connectionThrottle.WaitAsync(cancellationToken);
         }
-
-        Stream? stream = null;
 
         try
         {
-            stream = tcpClient.GetStream();
-            bool isHttps = false;
-            if (_options.Certificate != null)
-            {
-                var sslStream = new SslStream(stream);
-
-                SslServerAuthenticationOptions sslOptions = new()
-                {
-                    ApplicationProtocols =
-                    [
-                        SslApplicationProtocol.Http11
-                    ],
-                    ServerCertificate = _options.Certificate,
-                    EnabledSslProtocols = SslProtocols.None,
-                    ClientCertificateRequired = false,
-                };
-
-                var handshakeTimeout = _options.TlsHandshakeTimeout;
-                if (handshakeTimeout > TimeSpan.Zero && handshakeTimeout != Timeout.InfiniteTimeSpan)
-                {
-                    using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                    handshakeCts.CancelAfter(handshakeTimeout);
-                    try
-                    {
-                        await sslStream.AuthenticateAsServerAsync(sslOptions, handshakeCts.Token);
-                    }
-                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                    {
-                        // Slow / abandoned handshake — normal attacker/scanner behavior, not an error.
-                        if (_logger.IsEnabled(LogLevel.Information))
-                            _logger.LogInformation("TLS handshake timed out for {remoteEndPoint}", tcpClient.Client.RemoteEndPoint);
-                        return;
-                    }
-                }
-                else
-                {
-                    await sslStream.AuthenticateAsServerAsync(sslOptions, cancellationToken);
-                }
-
-                stream = sslStream;
-                isHttps = true;
-            }
-
-            // _app is guaranteed non-null here: StartAsync builds it before accepting connections.
-            var connection = new FlashHttpConnection(
-                tcpClient,
-                stream,
-                isHttps,
-                _app!,
-                _options.MetricsEnabled,
-                _requestPool,
-                _responsePool,
-                _contextPool,
-                _serviceProvider,
-                _logger,
-                _options.MaxHeaderCount,
-                _options.MaxRequestBodySize,
-                _options.ReceiveTimeout);
-
-            await connection.ProcessRequestsAsync(cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (AuthenticationException ex)
-        {
-            _logger.LogError(ex, "Error accepting client");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error accepting client");
-        }
-        finally
-        {
-            try { if (stream != null) await stream.DisposeAsync().ConfigureAwait(false); } catch { }
-            try { tcpClient.Close(); } catch { }
-            tcpClient.Dispose();
+            if (_logger.IsEnabled(LogLevel.Information))
+                _logger.LogInformation("Accepted new client connection from {remoteEndPoint}", tcpClient.Client.RemoteEndPoint);
 
             if (_options.MetricsEnabled)
             {
-                FlashHttpMetrics.DecrementActiveConnections();
+                FlashHttpMetrics.IncrementActiveConnections();
             }
+
+            Stream? stream = null;
+
+            try
+            {
+                stream = tcpClient.GetStream();
+                bool isHttps = false;
+                if (_options.Certificate != null)
+                {
+                    var sslStream = new SslStream(stream);
+
+                    SslServerAuthenticationOptions sslOptions = new()
+                    {
+                        ApplicationProtocols =
+                        [
+                            SslApplicationProtocol.Http11
+                        ],
+                        ServerCertificate = _options.Certificate,
+                        EnabledSslProtocols = SslProtocols.None,
+                        ClientCertificateRequired = false,
+                    };
+
+                    var handshakeTimeout = _options.TlsHandshakeTimeout;
+                    if (handshakeTimeout > TimeSpan.Zero && handshakeTimeout != Timeout.InfiniteTimeSpan)
+                    {
+                        using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                        handshakeCts.CancelAfter(handshakeTimeout);
+                        try
+                        {
+                            await sslStream.AuthenticateAsServerAsync(sslOptions, handshakeCts.Token);
+                        }
+                        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                        {
+                            // Slow / abandoned handshake — normal attacker/scanner behavior, not an error.
+                            if (_logger.IsEnabled(LogLevel.Information))
+                                _logger.LogInformation("TLS handshake timed out for {remoteEndPoint}", tcpClient.Client.RemoteEndPoint);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        await sslStream.AuthenticateAsServerAsync(sslOptions, cancellationToken);
+                    }
+
+                    stream = sslStream;
+                    isHttps = true;
+                }
+
+                // _app is guaranteed non-null here: StartAsync builds it before accepting connections.
+                var connection = new FlashHttpConnection(
+                    tcpClient,
+                    stream,
+                    isHttps,
+                    _app!,
+                    _options.MetricsEnabled,
+                    _requestPool,
+                    _responsePool,
+                    _contextPool,
+                    _serviceProvider,
+                    _logger,
+                    _options.MaxHeaderCount,
+                    _options.MaxRequestBodySize,
+                    _options.ReceiveTimeout);
+
+                await connection.ProcessRequestsAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (AuthenticationException ex)
+            {
+                _logger.LogError(ex, "Error accepting client");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error accepting client");
+            }
+            finally
+            {
+                try { if (stream != null) await stream.DisposeAsync().ConfigureAwait(false); } catch { }
+                try { tcpClient.Close(); } catch { }
+                tcpClient.Dispose();
+
+                if (_options.MetricsEnabled)
+                {
+                    FlashHttpMetrics.DecrementActiveConnections();
+                }
+            }
+        }
+        finally
+        {
+            _connectionThrottle?.Release();
         }
     }
 
@@ -268,6 +286,8 @@ public class FlashHttpServer : IDisposable
         {
             listener?.Stop();
             listener = null;
+            _connectionThrottle?.Dispose();
+            _connectionThrottle = null;
         }
     }
 }

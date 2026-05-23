@@ -66,14 +66,19 @@ internal partial class FlashHttpConnection
     {
         if (stream != null)
         {
-            stream.Flush();
+            try
+            {
+                stream.Flush();
+            }
+            catch { /* DisposeAsync below will handle cleanup */ }
             await stream.DisposeAsync();
         }
     }
 
     internal async Task ProcessRequestsAsync(CancellationToken cancellationToken)
     {
-        var inputPipe = new Pipe();
+        var pipeOptions = new PipeOptions(pauseWriterThreshold: 65536, resumeWriterThreshold: 32768);
+        var inputPipe = new Pipe(pipeOptions);
         var outputWriter = PipeWriter.Create(stream);
 
         using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -268,6 +273,7 @@ internal partial class FlashHttpConnection
                         {
                             FlashHttpMetrics.RecordRequestError(request!.Method, isHttps);
                         }
+                        response?.BodyStream?.Dispose();
                         throw;
                     }
                     finally
