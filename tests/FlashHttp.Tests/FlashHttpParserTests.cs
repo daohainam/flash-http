@@ -121,7 +121,7 @@ public sealed class FlashHttpParserTests
     [Fact]
     public void TryReadHttpRequest_Incomplete_WhenBodyNotFullyAvailable()
     {
-        var buffer = Seq("POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\n12");
+        var buffer = Seq("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\n12");
 
         var r = FlashHttpParser.TryReadHttpRequest(
             ref buffer,
@@ -132,7 +132,7 @@ public sealed class FlashHttpParserTests
             localEndPoint: null,
             requestPool: null);
 
-        Assert.Equal(FlashHttpParser.TryReadHttpRequestResults.Incomplete, r);
+        Assert.Equal(FlashHttpParser.TryReadHttpRequestResults.IncompleteBody, r);
     }
 
     [Fact]

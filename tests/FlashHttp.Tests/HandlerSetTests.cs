@@ -141,7 +141,7 @@ public sealed class HandlerSetTests
 
         Assert.Equal(405, ctx.Response.StatusCode);
         var allow = Assert.Single(ctx.Response.Headers, h => h.Name == "Allow");
-        Assert.Equal("GET, POST, DELETE", allow.Value);
+        Assert.Equal("GET, HEAD, POST, DELETE", allow.Value);
     }
 
     [Fact]

@@ -44,6 +44,15 @@ public class FlashHttpServerBuilder
         _options.Address = options.Address;
         _options.Port = options.Port;
         _options.Certificate = options.Certificate;
+        _options.RequestPoolMaximumRetained = options.RequestPoolMaximumRetained;
+        _options.MetricsEnabled = options.MetricsEnabled;
+        _options.MaxHeaderCount = options.MaxHeaderCount;
+        _options.MaxRequestHeadersTotalSize = options.MaxRequestHeadersTotalSize;
+        _options.MaxRequestBodySize = options.MaxRequestBodySize;
+        _options.ReceiveTimeout = options.ReceiveTimeout;
+        _options.RequestHeadersTimeout = options.RequestHeadersTimeout;
+        _options.TlsHandshakeTimeout = options.TlsHandshakeTimeout;
+        _options.MaxConcurrentConnections = options.MaxConcurrentConnections;
         return this;
     }
 

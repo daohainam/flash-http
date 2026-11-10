@@ -56,7 +56,8 @@ public sealed class SecurityTests
         // Build a request with exactly the max number of headers
         var sb = new StringBuilder();
         sb.AppendLine("GET / HTTP/1.1");
-        
+        sb.AppendLine("Host: localhost");
+
         // Add exactly 50 headers (within limit)
         for (int i = 0; i < 50; i++)
         {
@@ -78,7 +79,7 @@ public sealed class SecurityTests
             maxRequestBodySize: 10 * 1024 * 1024);
 
         Assert.Equal(FlashHttpParser.TryReadHttpRequestResults.Success, r);
-        Assert.Equal(50, req.Headers.Count);
+        Assert.Equal(51, req.Headers.Count);
     }
 
     [Fact]
@@ -111,7 +112,7 @@ public sealed class SecurityTests
         var maxSize = 1024; // 1 KB for this test
         var body = new string('a', maxSize);
 
-        var buffer = Seq($"POST / HTTP/1.1\r\nContent-Length: {maxSize}\r\n\r\n{body}");
+        var buffer = Seq($"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {maxSize}\r\n\r\n{body}");
 
         var r = FlashHttpParser.TryReadHttpRequest(
             ref buffer,
@@ -285,10 +286,11 @@ public sealed class SecurityTests
     [Fact]
     public void TryReadHttpRequest_ExactlyMaxHeaders_Success()
     {
-        // Boundary: maxHeaderCount headers must succeed (not off-by-one).
+        // Boundary: maxHeaderCount headers must succeed (not off-by-one). Host counts as one.
         var sb = new StringBuilder();
         sb.Append("GET / HTTP/1.1\r\n");
-        for (int i = 0; i < 100; i++)
+        sb.Append("Host: localhost\r\n");
+        for (int i = 0; i < 99; i++)
             sb.Append($"X-Header-{i}: value{i}\r\n");
         sb.Append("\r\n");
 

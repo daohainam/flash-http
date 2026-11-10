@@ -115,7 +115,7 @@ public sealed class FlashHttpServerTests
     }
 
     [Fact]
-    public async Task Middleware_Exception_ClosesConnection_RequestFails()
+    public async Task Middleware_Exception_Returns500_AndClosesConnection()
     {
         using var server = CreateServer();
 
@@ -134,7 +134,9 @@ public sealed class FlashHttpServerTests
 
         using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
 
-        await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync("/", cts.Token));
+        var resp = await client.GetAsync("/", cts.Token);
+        Assert.Equal(HttpStatusCode.InternalServerError, resp.StatusCode);
+        Assert.Equal("close", resp.Headers.Connection.FirstOrDefault());
 
         cts.Cancel();
         try { await startTask; } catch (OperationCanceledException) { }
