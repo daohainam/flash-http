@@ -9,70 +9,99 @@ namespace FlashHttp.Server;
 
 /// <summary>
 /// Central registry for HTTP route handlers.
-/// Supports both synchronous and asynchronous handlers while remaining
-/// backwards compatible with the original sync-only design.
-/// Thread-safe for concurrent registration and dispatch.
+/// Registration is serialised by a lock and publishes a fresh, immutable route table
+/// (copy-on-write), so dispatch on the hot path is lock-free.
 /// </summary>
 public sealed class HandlerSet
 {
-    // Delegate cho async handlers 
     public delegate ValueTask FlashRequestAsyncDelegate(
         IFlashHandlerContext context,
         CancellationToken cancellationToken);
 
-    private readonly object _lock = new object();
-    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onGetHandlers = [];
-    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onPostHandlers = [];
-    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onPutHandlers = [];
-    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onDeleteHandlers = [];
-    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onHeadHandlers = [];
-    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onPatchHandlers = [];
-    private readonly Dictionary<string, FlashRequestAsyncDelegate> _onOptionsHandlers = [];
+    /// <summary>
+    /// Immutable snapshot of all route dictionaries. Replaced wholesale on every Register().
+    /// </summary>
+    private sealed class RouteTable
+    {
+        public readonly Dictionary<string, FlashRequestAsyncDelegate> Get;
+        public readonly Dictionary<string, FlashRequestAsyncDelegate> Post;
+        public readonly Dictionary<string, FlashRequestAsyncDelegate> Put;
+        public readonly Dictionary<string, FlashRequestAsyncDelegate> Delete;
+        public readonly Dictionary<string, FlashRequestAsyncDelegate> Head;
+        public readonly Dictionary<string, FlashRequestAsyncDelegate> Patch;
+        public readonly Dictionary<string, FlashRequestAsyncDelegate> Options;
 
-    // Public readonly access for backward compatibility
-    // WARNING: Direct modifications to these dictionaries bypass thread safety.
-    // Use the Register() method for thread-safe handler registration.
-    /// <summary>
-    /// Gets the dictionary of GET handlers. For thread-safe registration, use Register() method.
-    /// </summary>
+        public RouteTable()
+        {
+            Get = [];
+            Post = [];
+            Put = [];
+            Delete = [];
+            Head = [];
+            Patch = [];
+            Options = [];
+        }
+
+        private RouteTable(RouteTable source, HttpMethodsEnum changed, Dictionary<string, FlashRequestAsyncDelegate> replacement)
+        {
+            Get = changed == HttpMethodsEnum.Get ? replacement : source.Get;
+            Post = changed == HttpMethodsEnum.Post ? replacement : source.Post;
+            Put = changed == HttpMethodsEnum.Put ? replacement : source.Put;
+            Delete = changed == HttpMethodsEnum.Delete ? replacement : source.Delete;
+            Head = changed == HttpMethodsEnum.Head ? replacement : source.Head;
+            Patch = changed == HttpMethodsEnum.Patch ? replacement : source.Patch;
+            Options = changed == HttpMethodsEnum.Options ? replacement : source.Options;
+        }
+
+        public Dictionary<string, FlashRequestAsyncDelegate>? For(HttpMethodsEnum method)
+            => method switch
+            {
+                HttpMethodsEnum.Get => Get,
+                HttpMethodsEnum.Post => Post,
+                HttpMethodsEnum.Put => Put,
+                HttpMethodsEnum.Delete => Delete,
+                HttpMethodsEnum.Head => Head,
+                HttpMethodsEnum.Patch => Patch,
+                HttpMethodsEnum.Options => Options,
+                _ => null
+            };
+
+        public RouteTable With(HttpMethodsEnum method, string path, FlashRequestAsyncDelegate handler)
+        {
+            var current = For(method) ?? throw new ArgumentOutOfRangeException(nameof(method), method, "Unsupported HTTP method");
+            var copy = new Dictionary<string, FlashRequestAsyncDelegate>(current)
+            {
+                [path] = handler
+            };
+            return new RouteTable(this, method, copy);
+        }
+    }
+
+    private readonly object _lock = new object();
+    private RouteTable _routes = new();
+
+    // Public access kept for backward compatibility. The dictionaries are snapshots: mutating
+    // them directly is not thread-safe and may be lost on the next Register() call.
     [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
-    public Dictionary<string, FlashRequestAsyncDelegate> OnGetHandlers => _onGetHandlers;
-    
-    /// <summary>
-    /// Gets the dictionary of POST handlers. For thread-safe registration, use Register() method.
-    /// </summary>
+    public Dictionary<string, FlashRequestAsyncDelegate> OnGetHandlers => Volatile.Read(ref _routes).Get;
+
     [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
-    public Dictionary<string, FlashRequestAsyncDelegate> OnPostHandlers => _onPostHandlers;
-    
-    /// <summary>
-    /// Gets the dictionary of PUT handlers. For thread-safe registration, use Register() method.
-    /// </summary>
+    public Dictionary<string, FlashRequestAsyncDelegate> OnPostHandlers => Volatile.Read(ref _routes).Post;
+
     [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
-    public Dictionary<string, FlashRequestAsyncDelegate> OnPutHandlers => _onPutHandlers;
-    
-    /// <summary>
-    /// Gets the dictionary of DELETE handlers. For thread-safe registration, use Register() method.
-    /// </summary>
+    public Dictionary<string, FlashRequestAsyncDelegate> OnPutHandlers => Volatile.Read(ref _routes).Put;
+
     [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
-    public Dictionary<string, FlashRequestAsyncDelegate> OnDeleteHandlers => _onDeleteHandlers;
-    
-    /// <summary>
-    /// Gets the dictionary of HEAD handlers. For thread-safe registration, use Register() method.
-    /// </summary>
+    public Dictionary<string, FlashRequestAsyncDelegate> OnDeleteHandlers => Volatile.Read(ref _routes).Delete;
+
     [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
-    public Dictionary<string, FlashRequestAsyncDelegate> OnHeadHandlers => _onHeadHandlers;
-    
-    /// <summary>
-    /// Gets the dictionary of PATCH handlers. For thread-safe registration, use Register() method.
-    /// </summary>
+    public Dictionary<string, FlashRequestAsyncDelegate> OnHeadHandlers => Volatile.Read(ref _routes).Head;
+
     [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
-    public Dictionary<string, FlashRequestAsyncDelegate> OnPatchHandlers => _onPatchHandlers;
-    
-    /// <summary>
-    /// Gets the dictionary of OPTIONS handlers. For thread-safe registration, use Register() method.
-    /// </summary>
+    public Dictionary<string, FlashRequestAsyncDelegate> OnPatchHandlers => Volatile.Read(ref _routes).Patch;
+
     [Obsolete("Direct dictionary access bypasses thread safety. Use Register() method instead.")]
-    public Dictionary<string, FlashRequestAsyncDelegate> OnOptionsHandlers => _onOptionsHandlers;
+    public Dictionary<string, FlashRequestAsyncDelegate> OnOptionsHandlers => Volatile.Read(ref _routes).Options;
 
     #region Registration helpers
 
@@ -83,23 +112,10 @@ public sealed class HandlerSet
 
         lock (_lock)
         {
-            var dict = GetAsyncDictionary(method);
-            dict[path] = handler;
+            var next = _routes.With(method, path, handler);
+            Volatile.Write(ref _routes, next);
         }
     }
-
-    private Dictionary<string, FlashRequestAsyncDelegate> GetAsyncDictionary(HttpMethodsEnum method)
-        => method switch
-        {
-            HttpMethodsEnum.Get => _onGetHandlers,
-            HttpMethodsEnum.Post => _onPostHandlers,
-            HttpMethodsEnum.Put => _onPutHandlers,
-            HttpMethodsEnum.Delete => _onDeleteHandlers,
-            HttpMethodsEnum.Head => _onHeadHandlers,
-            HttpMethodsEnum.Patch => _onPatchHandlers,
-            HttpMethodsEnum.Options => _onOptionsHandlers,
-            _ => throw new ArgumentOutOfRangeException(nameof(method), method, "Unsupported HTTP method")
-        };
 
     #endregion
 
@@ -107,38 +123,28 @@ public sealed class HandlerSet
 
     public ValueTask HandleAsync(IFlashHandlerContext context, CancellationToken cancellationToken)
     {
-        FlashRequestAsyncDelegate? asyncHandler = null;
-        string? allowHeader = null;
+        var routes = Volatile.Read(ref _routes);
+        var method = context.Request.Method;
+        var path = context.Request.Path;
 
-        lock (_lock)
+        FlashRequestAsyncDelegate? handler = null;
+        routes.For(method)?.TryGetValue(path, out handler);
+
+        // RFC 9110 §9.3.2: HEAD is GET without a body. Fall back to the GET handler so routes
+        // do not need to register HEAD explicitly; the connection strips the body.
+        if (handler is null && method == HttpMethodsEnum.Head)
         {
-            Dictionary<string, FlashRequestAsyncDelegate>? asyncHandlers = context.Request.Method switch
-            {
-                HttpMethodsEnum.Get => _onGetHandlers,
-                HttpMethodsEnum.Post => _onPostHandlers,
-                HttpMethodsEnum.Put => _onPutHandlers,
-                HttpMethodsEnum.Delete => _onDeleteHandlers,
-                HttpMethodsEnum.Head => _onHeadHandlers,
-                HttpMethodsEnum.Patch => _onPatchHandlers,
-                HttpMethodsEnum.Options => _onOptionsHandlers,
-                _ => null
-            };
-
-            asyncHandlers?.TryGetValue(context.Request.Path, out asyncHandler);
-
-            // If the request method has no handler for this path, check whether some
-            // *other* method does — in which case the right response is 405, not 404.
-            if (asyncHandler is null)
-            {
-                allowHeader = BuildAllowHeaderForPath(context.Request.Path);
-            }
+            routes.Get.TryGetValue(path, out handler);
         }
 
-        if (asyncHandler != null)
+        if (handler != null)
         {
-            return asyncHandler(context, cancellationToken);
+            return handler(context, cancellationToken);
         }
 
+        // If the request method has no handler for this path, check whether some
+        // *other* method does; in which case the right response is 405, not 404.
+        var allowHeader = BuildAllowHeaderForPath(routes, path);
         if (allowHeader is not null)
         {
             SetMethodNotAllowed(context.Response, allowHeader);
@@ -150,18 +156,25 @@ public sealed class HandlerSet
         return ValueTask.CompletedTask;
     }
 
-    // Caller must hold _lock. Returns a comma-separated method list (RFC 7231 §7.4.1)
-    // or null if no method is registered for the given path.
-    private string? BuildAllowHeaderForPath(string path)
+    // Returns a comma-separated method list (RFC 9110 §10.2.1) or null if no method is
+    // registered for the given path. HEAD is implied by GET.
+    private static string? BuildAllowHeaderForPath(RouteTable routes, string path)
     {
         StringBuilder? sb = null;
-        AppendIfRegistered(_onGetHandlers, path, ref sb, "GET");
-        AppendIfRegistered(_onHeadHandlers, path, ref sb, "HEAD");
-        AppendIfRegistered(_onPostHandlers, path, ref sb, "POST");
-        AppendIfRegistered(_onPutHandlers, path, ref sb, "PUT");
-        AppendIfRegistered(_onPatchHandlers, path, ref sb, "PATCH");
-        AppendIfRegistered(_onDeleteHandlers, path, ref sb, "DELETE");
-        AppendIfRegistered(_onOptionsHandlers, path, ref sb, "OPTIONS");
+        bool hasGet = routes.Get.ContainsKey(path);
+        if (hasGet)
+        {
+            Append(ref sb, "GET");
+        }
+        if (hasGet || routes.Head.ContainsKey(path))
+        {
+            Append(ref sb, "HEAD");
+        }
+        AppendIfRegistered(routes.Post, path, ref sb, "POST");
+        AppendIfRegistered(routes.Put, path, ref sb, "PUT");
+        AppendIfRegistered(routes.Patch, path, ref sb, "PATCH");
+        AppendIfRegistered(routes.Delete, path, ref sb, "DELETE");
+        AppendIfRegistered(routes.Options, path, ref sb, "OPTIONS");
         return sb?.ToString();
     }
 
@@ -172,6 +185,11 @@ public sealed class HandlerSet
         string methodName)
     {
         if (!dict.ContainsKey(path)) return;
+        Append(ref sb, methodName);
+    }
+
+    private static void Append(ref StringBuilder? sb, string methodName)
+    {
         if (sb is null)
         {
             sb = new StringBuilder(methodName);
@@ -194,7 +212,7 @@ public sealed class HandlerSet
         response.StatusCode = 405;
         response.ReasonPhrase = "Method Not Allowed";
         response.Body = Encoding.UTF8.GetBytes("Method Not Allowed");
-        // RFC 7231 §6.5.5: a 405 response MUST include an Allow header.
+        // RFC 9110 §15.5.6: a 405 response MUST include an Allow header.
         response.Headers.Add(new HttpHeader("Allow", allowHeader));
     }
 

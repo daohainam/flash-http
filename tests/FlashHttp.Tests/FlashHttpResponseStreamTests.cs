@@ -206,8 +206,12 @@ public sealed class FlashHttpResponseStreamTests
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal(testContent, body);
-        // For non-seekable streams, connection should be closed after response
-        Assert.Equal("close", resp.Headers.Connection.FirstOrDefault());
+        // Unknown length is sent with chunked transfer coding so the connection stays reusable.
+        Assert.True(resp.Headers.TransferEncodingChunked);
+        Assert.NotEqual("close", resp.Headers.Connection.FirstOrDefault());
+
+        var second = await client.GetAsync("/nonseekable", cts.Token);
+        Assert.Equal(testContent, await second.Content.ReadAsStringAsync(cts.Token));
 
         cts.Cancel();
         try { await startTask; } catch (OperationCanceledException) { }

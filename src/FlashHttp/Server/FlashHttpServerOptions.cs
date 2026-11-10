@@ -22,6 +22,14 @@ public class FlashHttpServerOptions
     public int MaxHeaderCount { get; set; } = 100;
 
     /// <summary>
+    /// Maximum total size (in bytes) of the request header section, i.e. all header lines
+    /// including their CRLF terminators, measured from the end of the request line.
+    /// Default is 32 KB. Requests exceeding it are rejected with 431 while the headers are
+    /// still arriving, so a client cannot force the server to buffer unbounded data.
+    /// </summary>
+    public int MaxRequestHeadersTotalSize { get; set; } = 32 * 1024;
+
+    /// <summary>
     /// Maximum request body size in bytes. Default is 10MB.
     /// Set to prevent DoS attacks via large Content-Length values.
     /// </summary>
@@ -36,6 +44,14 @@ public class FlashHttpServerOptions
     public TimeSpan ReceiveTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// Maximum time allowed between the first byte of a request and the end of its header
+    /// section. Default is 30 seconds. Use <see cref="System.Threading.Timeout.InfiniteTimeSpan"/>
+    /// to disable. Complements <see cref="ReceiveTimeout"/>: a client trickling one byte
+    /// per read would otherwise never trip the idle timeout. Exceeding it yields 408.
+    /// </summary>
+    public TimeSpan RequestHeadersTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// Maximum time the TLS handshake (<c>AuthenticateAsServerAsync</c>) is allowed to
     /// take. Default is 10 seconds. Use <see cref="System.Threading.Timeout.InfiniteTimeSpan"/>
     /// to disable. Hardens against slow-handshake DoS.
@@ -44,8 +60,8 @@ public class FlashHttpServerOptions
 
     /// <summary>
     /// Maximum number of concurrent connections the server will accept.
-    /// Default is 0 (unlimited). When reached, new connections will wait until
-    /// an existing connection is closed.
+    /// Default is 0 (unlimited). When reached, the accept loop pauses until an existing
+    /// connection is closed; pending clients wait in the kernel backlog.
     /// </summary>
     public int MaxConcurrentConnections { get; set; } = 0;
 }

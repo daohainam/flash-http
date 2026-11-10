@@ -38,3 +38,20 @@ Features
 - Basic authentication
 - JWT authentication
 - Logging / metrics / custom filters
+
+---
+
+Protocol behaviour
+
+FlashHttp speaks HTTP/1.1 only. The following are deliberate and worth knowing before you put it behind real clients:
+
+- Requests must be `HTTP/1.1` with exactly one `Host` header; HTTP/1.0 gets `505`, a missing or duplicated `Host` gets `400`. ApacheBench (`ab`) speaks HTTP/1.0 and will not work; use `wrk`, `bombardier`, `oha` or `h2load --h1`.
+- Request bodies are framed by `Content-Length` only and are fully buffered before your handler runs (bounded by `MaxRequestBodySize`). `Transfer-Encoding: chunked` requests are refused with `501`.
+- `Expect: 100-continue` is honoured.
+- `HEAD` is served by the `GET` handler with the body stripped; `1xx`, `204` and `304` responses never carry a body.
+- A `BodyStream` that cannot seek is sent with `Transfer-Encoding: chunked`, so keep-alive still works for streamed responses.
+- Unhandled exceptions in handlers or middleware produce `500 Internal Server Error` and close the connection.
+- Every response carries a `Date` header. `Content-Length`, `Transfer-Encoding`, `Connection` and `Date` are owned by the server; set them on the response and they are ignored.
+- The request path is matched exactly as sent (no percent-decoding, no trailing-slash normalisation). Absolute-form targets (`GET http://host/path`) are reduced to their path.
+- Limits and timeouts (`MaxHeaderCount`, `MaxRequestHeadersTotalSize`, `MaxRequestBodySize`, `ReceiveTimeout`, `RequestHeadersTimeout`, `TlsHandshakeTimeout`, `MaxConcurrentConnections`) live on `FlashHttpServerOptions`. Oversized or slow requests get `414`/`431`/`413`/`408` and the connection is closed.
+- `StopAsync` stops accepting, closes idle keep-alive connections and lets in-flight requests finish; cancelling the token passed to `StartAsync` aborts everything immediately.
