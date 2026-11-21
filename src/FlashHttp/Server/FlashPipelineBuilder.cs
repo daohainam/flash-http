@@ -21,10 +21,15 @@ public sealed class FlashPipelineBuilder
 	{
 		ArgumentNullException.ThrowIfNull(terminal);
 
-		FlashNext next = static (context, cancellationToken) => ValueTask.CompletedTask;
+		// Nothing to compose: hand back the terminal itself instead of wrapping it in adapters
+		// that would add delegate hops to every request.
+		if (_components.Count == 0)
+		{
+			return terminal;
+		}
 
 		// terminal adapter
-		next = (context, cancellationToken) => terminal(context, cancellationToken);
+		FlashNext next = (context, cancellationToken) => terminal(context, cancellationToken);
 
 		for (int i = _components.Count - 1; i >= 0; i--)
 		{

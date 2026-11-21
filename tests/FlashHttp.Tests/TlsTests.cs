@@ -43,6 +43,21 @@ public sealed class TlsTests
     private static bool AcceptAnyCert(object sender, X509Certificate? cert, X509Chain? chain, SslPolicyErrors errors) => true;
 
     [Fact]
+    public void TlsOptions_CarryAPrebuiltCertificateContext()
+    {
+        using var cert = CreateSelfSignedCert();
+
+        var options = FlashHttpServer.CreateSslOptions(cert);
+
+        // The context (certificate chain and credentials) is built once here and shared by
+        // every handshake, instead of being rebuilt per connection from ServerCertificate.
+        Assert.NotNull(options.ServerCertificateContext);
+        Assert.Null(options.ServerCertificate);
+        Assert.Equal([SslApplicationProtocol.Http11], options.ApplicationProtocols);
+        Assert.False(options.ClientCertificateRequired);
+    }
+
+    [Fact]
     public async Task RealTlsHandshake_NegotiatesHttp11AndServesRequest()
     {
         using var cert = CreateSelfSignedCert();

@@ -3,11 +3,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.ObjectPool;
-using System.IO.Pipelines;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using static FlashHttp.Server.HandlerSet;
 
 namespace FlashHttp.Server;
@@ -23,9 +23,10 @@ public class FlashHttpServer : IDisposable
     private readonly ObjectPool<FlashHandlerContext> _contextPool;
 
     private readonly HandlerSet handlerSet = new();
+    private readonly PathLookup _pathLookup;
     private TcpListener? listener;
     private SemaphoreSlim? _connectionThrottle;
-    private PipeOptions? _pipeOptions;
+    private SslServerAuthenticationOptions? _sslOptions;
 
     private readonly FlashPipelineBuilder _globalPipeline = new();
     private FlashRequestAsyncDelegate? _app;
@@ -45,13 +46,19 @@ public class FlashHttpServer : IDisposable
         _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
         _logger = logger ?? NullLogger<FlashHttpServer>.Instance;
 
+        // Lets the parser hand out the registered route string for a matching path.
+        _pathLookup = handlerSet.FindRegisteredPath;
+
         var poolProvider = new DefaultObjectPoolProvider
         {
             MaximumRetained = _options.RequestPoolMaximumRetained
         };
         _requestPool = poolProvider.Create(new FlashHttpRequestPooledObjectPolicy());
         _responsePool = poolProvider.Create(new FlashHttpResponsePooledObjectPolicy());
-        _contextPool = poolProvider.Create(new FlashHttpContextPooledObjectPolicy());
+
+        // Resolved once: with a scope factory, contexts create their DI scope lazily per request.
+        _contextPool = poolProvider.Create(
+            new FlashHttpContextPooledObjectPolicy(_serviceProvider.GetService<IServiceScopeFactory>()));
     }
 
     public FlashHttpServer(IServiceProvider serviceProvider, Action<FlashHttpServerOptions>? configureOptions = null, ILogger? logger = null)
@@ -97,7 +104,11 @@ public class FlashHttpServer : IDisposable
             throw new InvalidOperationException("StartAsync has already been called.");
 
         _app = _globalPipeline.Build(handlerSet.HandleAsync);
-        _pipeOptions = FlashHttpConnection.CreatePipeOptions(_options);
+
+        if (_options.Certificate != null)
+        {
+            _sslOptions = CreateSslOptions(_options.Certificate);
+        }
 
         if (_options.MaxConcurrentConnections > 0)
         {
@@ -130,11 +141,11 @@ public class FlashHttpServer : IDisposable
                     {
                         // Throttle before accept so pending clients wait in the kernel backlog
                         // instead of holding accepted sockets open with no timeout.
-                        await _connectionThrottle.WaitAsync(acceptToken);
+                        await _connectionThrottle.WaitAsync(acceptToken).ConfigureAwait(false);
                         throttleAcquired = true;
                     }
 
-                    TcpClient client = await localListener.AcceptTcpClientAsync(acceptToken);
+                    TcpClient client = await localListener.AcceptTcpClientAsync(acceptToken).ConfigureAwait(false);
 
                     throttleAcquired = false; // ownership moves to the connection task
                     _ = HandleNewClientConnectionAsync(client, _connectionsCts.Token);
@@ -168,7 +179,7 @@ public class FlashHttpServer : IDisposable
 
                     try
                     {
-                        await Task.Delay(100, acceptToken);
+                        await Task.Delay(100, acceptToken).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException)
                     {
@@ -211,20 +222,11 @@ public class FlashHttpServer : IDisposable
 
                 stream = tcpClient.GetStream();
                 bool isHttps = false;
-                if (_options.Certificate != null)
+                // Built once in StartAsync and shared by every handshake.
+                var sslOptions = _sslOptions;
+                if (sslOptions != null)
                 {
                     var sslStream = new SslStream(stream);
-
-                    SslServerAuthenticationOptions sslOptions = new()
-                    {
-                        ApplicationProtocols =
-                        [
-                            SslApplicationProtocol.Http11
-                        ],
-                        ServerCertificate = _options.Certificate,
-                        EnabledSslProtocols = SslProtocols.None,
-                        ClientCertificateRequired = false,
-                    };
 
                     var handshakeTimeout = _options.TlsHandshakeTimeout;
                     if (handshakeTimeout > TimeSpan.Zero && handshakeTimeout != Timeout.InfiniteTimeSpan)
@@ -233,7 +235,7 @@ public class FlashHttpServer : IDisposable
                         handshakeCts.CancelAfter(handshakeTimeout);
                         try
                         {
-                            await sslStream.AuthenticateAsServerAsync(sslOptions, handshakeCts.Token);
+                            await sslStream.AuthenticateAsServerAsync(sslOptions, handshakeCts.Token).ConfigureAwait(false);
                         }
                         catch (OperationCanceledException) when (!abortToken.IsCancellationRequested)
                         {
@@ -245,29 +247,35 @@ public class FlashHttpServer : IDisposable
                     }
                     else
                     {
-                        await sslStream.AuthenticateAsServerAsync(sslOptions, abortToken);
+                        await sslStream.AuthenticateAsServerAsync(sslOptions, abortToken).ConfigureAwait(false);
                     }
 
                     stream = sslStream;
                     isHttps = true;
                 }
 
-                // _app and _pipeOptions are non-null here: StartAsync sets them before accepting.
+                // _app is non-null here: StartAsync sets it before accepting.
                 var connection = new FlashHttpConnection(
-                    tcpClient,
+                    tcpClient.Client.RemoteEndPoint as IPEndPoint,
+                    tcpClient.Client.LocalEndPoint as IPEndPoint,
                     stream,
                     isHttps,
                     _app!,
                     _options,
-                    _pipeOptions!,
                     _requestPool,
                     _responsePool,
                     _contextPool,
                     _serviceProvider,
                     _logger,
-                    _stoppingCts.Token);
+                    _stoppingCts.Token,
+                    _pathLookup);
 
-                await connection.ProcessRequestsAsync(abortToken);
+                await connection.ProcessRequestsAsync(abortToken).ConfigureAwait(false);
+
+                if (connection.ClosedAfterError)
+                {
+                    await LingeringCloseAsync(tcpClient.Client, stream as SslStream, abortToken).ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -308,6 +316,78 @@ public class FlashHttpServer : IDisposable
             {
                 _connectionsDrained.TrySetResult();
             }
+        }
+    }
+
+    /// <summary>
+    /// Builds the TLS options shared by all connections. The certificate context (chain and
+    /// credentials) is created once here; passing the bare certificate instead makes the
+    /// runtime rebuild that context for every handshake.
+    /// </summary>
+    internal static SslServerAuthenticationOptions CreateSslOptions(X509Certificate2 certificate)
+    {
+        var options = new SslServerAuthenticationOptions
+        {
+            ApplicationProtocols =
+            [
+                SslApplicationProtocol.Http11
+            ],
+            EnabledSslProtocols = SslProtocols.None,
+            ClientCertificateRequired = false,
+        };
+
+        try
+        {
+            options.ServerCertificateContext = SslStreamCertificateContext.Create(certificate, additionalCertificates: null);
+        }
+        catch (Exception)
+        {
+            // A certificate the context cannot be built from (for example one without a
+            // private key) keeps the previous behaviour: each handshake reports the problem.
+            options.ServerCertificate = certificate;
+        }
+
+        return options;
+    }
+
+    // Upper bound on how long a rejected connection is kept around to let the client read the
+    // error response. Well-behaved clients close as soon as they see the server's FIN.
+    private static readonly TimeSpan LingerTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Closes a connection the server gave up on while the client may still be sending: signal
+    /// end of output first, then discard whatever keeps arriving until the client closes or the
+    /// linger period ends. Without this, unread input turns the close into a TCP reset and the
+    /// client can lose the error response it was just sent.
+    /// </summary>
+    private static async Task LingeringCloseAsync(Socket socket, SslStream? sslStream, CancellationToken abortToken)
+    {
+        byte[] buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(8192);
+        try
+        {
+            using var lingerCts = CancellationTokenSource.CreateLinkedTokenSource(abortToken);
+            lingerCts.CancelAfter(LingerTimeout);
+
+            if (sslStream is not null)
+            {
+                // close_notify, so the client does not see a truncated TLS stream.
+                await sslStream.ShutdownAsync().WaitAsync(lingerCts.Token).ConfigureAwait(false);
+            }
+
+            socket.Shutdown(SocketShutdown.Send);
+
+            // Raw socket on purpose: the content is discarded, so there is nothing to decrypt.
+            while (await socket.ReceiveAsync(buffer.AsMemory(), SocketFlags.None, lingerCts.Token).ConfigureAwait(false) > 0)
+            {
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or SocketException or IOException or ObjectDisposedException or InvalidOperationException)
+        {
+            // Best effort: the connection is being closed either way.
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 

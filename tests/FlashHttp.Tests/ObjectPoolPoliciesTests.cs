@@ -74,6 +74,29 @@ public sealed class ObjectPoolPoliciesTests
         Assert.Empty(resp.Headers);
     }
 
+    private sealed class ThrowingOnDisposeStream : MemoryStream
+    {
+        protected override void Dispose(bool disposing) => throw new InvalidOperationException("dispose failed");
+    }
+
+    [Fact]
+    public void FlashHttpResponsePooledObjectPolicy_Return_ResetsEvenWhenBodyStreamDisposeThrows()
+    {
+        var policy = new FlashHttpResponsePooledObjectPolicy();
+        var resp = policy.Create();
+
+        resp.StatusCode = 200;
+        resp.Headers.Add(new HttpHeader("X", "1"));
+        resp.BodyStream = new ThrowingOnDisposeStream();
+
+        // A misbehaving stream must not leave the response half reset or abort connection cleanup.
+        Assert.True(policy.Return(resp));
+
+        Assert.Null(resp.BodyStream);
+        Assert.Equal(404, resp.StatusCode);
+        Assert.Empty(resp.Headers);
+    }
+
     [Fact]
     public void FlashHttpContextPooledObjectPolicy_Return_ResetsContext()
     {
