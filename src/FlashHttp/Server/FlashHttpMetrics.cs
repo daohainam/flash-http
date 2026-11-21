@@ -56,16 +56,25 @@ internal static class FlashHttpMetrics
         int requestBodyBytes,
         int responseBodyBytes)
     {
+        // Nobody is listening: skip building the tag list altogether.
+        if (!RequestsTotal.Enabled
+            && !RequestDurationMs.Enabled
+            && !RequestBodyBytesTotal.Enabled
+            && !ResponseBytesTotal.Enabled)
+        {
+            return;
+        }
+
         // Metrics are observability, not control flow — a misbehaving listener must
         // never bring down the connection handler.
         try
         {
             TagList tags = new();
             tags.Add("http.method", MethodToTagValue(method));
-            tags.Add("http.status_code", statusCode);
+            tags.Add("http.status_code", BoxStatusCode(statusCode));
             tags.Add("net.transport", "ip_tcp");
             tags.Add("url.scheme", isHttps ? "https" : "http");
-            tags.Add("http.keep_alive", keepAlive);
+            tags.Add("http.keep_alive", keepAlive ? BoxedTrue : BoxedFalse);
 
             RequestsTotal.Add(1, tags);
             RequestDurationMs.Record(durationMs, tags);
@@ -85,6 +94,11 @@ internal static class FlashHttpMetrics
 
     internal static void RecordRequestError(HttpMethodsEnum method, bool isHttps)
     {
+        if (!RequestErrorsTotal.Enabled)
+        {
+            return;
+        }
+
         try
         {
             TagList tags = new();
@@ -99,14 +113,19 @@ internal static class FlashHttpMetrics
     // point — observability needs the status code and scheme far more than the method.
     internal static void RecordErrorResponse(int statusCode, bool isHttps)
     {
+        if (!RequestsTotal.Enabled)
+        {
+            return;
+        }
+
         try
         {
             TagList tags = new();
             tags.Add("http.method", "UNKNOWN");
-            tags.Add("http.status_code", statusCode);
+            tags.Add("http.status_code", BoxStatusCode(statusCode));
             tags.Add("net.transport", "ip_tcp");
             tags.Add("url.scheme", isHttps ? "https" : "http");
-            tags.Add("http.keep_alive", false);
+            tags.Add("http.keep_alive", BoxedFalse);
 
             RequestsTotal.Add(1, tags);
         }
@@ -121,6 +140,29 @@ internal static class FlashHttpMetrics
     internal static void DecrementActiveConnections()
     {
         try { ActiveConnections.Add(-1); } catch { }
+    }
+
+    // Tag values are stored as object, so an int or bool tag boxes on every request unless
+    // the boxes are reused. Status codes outside 100-599 are rare enough to box on demand.
+    private const int FirstCachedStatusCode = 100;
+    private static readonly object BoxedTrue = true;
+    private static readonly object BoxedFalse = false;
+    private static readonly object[] BoxedStatusCodes = CreateBoxedStatusCodes();
+
+    private static object[] CreateBoxedStatusCodes()
+    {
+        var boxes = new object[500];
+        for (int i = 0; i < boxes.Length; i++)
+        {
+            boxes[i] = FirstCachedStatusCode + i;
+        }
+        return boxes;
+    }
+
+    private static object BoxStatusCode(int statusCode)
+    {
+        int index = statusCode - FirstCachedStatusCode;
+        return (uint)index < (uint)BoxedStatusCodes.Length ? BoxedStatusCodes[index] : statusCode;
     }
 
     private static string MethodToTagValue(HttpMethodsEnum method)

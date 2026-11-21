@@ -31,6 +31,19 @@ public sealed class HandlerSet
         public readonly Dictionary<string, FlashRequestAsyncDelegate> Patch;
         public readonly Dictionary<string, FlashRequestAsyncDelegate> Options;
 
+        /// <summary>
+        /// Pre-rendered <c>Allow</c> header value for every path registered through
+        /// <see cref="With"/>, so a request that misses its method table needs one lookup to
+        /// tell 405 from 404 instead of probing every verb.
+        /// </summary>
+        public readonly Dictionary<string, string> AllowByPath;
+
+        /// <summary>
+        /// Span-keyed view of <see cref="AllowByPath"/>: finds the registered string for a path
+        /// that has not been turned into a string yet.
+        /// </summary>
+        public readonly Dictionary<string, string>.AlternateLookup<ReadOnlySpan<char>> PathLookup;
+
         public RouteTable()
         {
             Get = [];
@@ -40,9 +53,11 @@ public sealed class HandlerSet
             Head = [];
             Patch = [];
             Options = [];
+            AllowByPath = new Dictionary<string, string>(StringComparer.Ordinal);
+            PathLookup = AllowByPath.GetAlternateLookup<ReadOnlySpan<char>>();
         }
 
-        private RouteTable(RouteTable source, HttpMethodsEnum changed, Dictionary<string, FlashRequestAsyncDelegate> replacement)
+        private RouteTable(RouteTable source, HttpMethodsEnum changed, Dictionary<string, FlashRequestAsyncDelegate> replacement, string changedPath)
         {
             Get = changed == HttpMethodsEnum.Get ? replacement : source.Get;
             Post = changed == HttpMethodsEnum.Post ? replacement : source.Post;
@@ -51,6 +66,27 @@ public sealed class HandlerSet
             Head = changed == HttpMethodsEnum.Head ? replacement : source.Head;
             Patch = changed == HttpMethodsEnum.Patch ? replacement : source.Patch;
             Options = changed == HttpMethodsEnum.Options ? replacement : source.Options;
+
+            AllowByPath = new Dictionary<string, string>(source.AllowByPath, StringComparer.Ordinal)
+            {
+                [changedPath] = BuildAllowHeader(changedPath)
+            };
+            PathLookup = AllowByPath.GetAlternateLookup<ReadOnlySpan<char>>();
+        }
+
+        // Comma-separated method list (RFC 9110 §10.2.1). HEAD is implied by GET.
+        private string BuildAllowHeader(string path)
+        {
+            var methods = new List<string>(7);
+            bool hasGet = Get.ContainsKey(path);
+            if (hasGet) methods.Add("GET");
+            if (hasGet || Head.ContainsKey(path)) methods.Add("HEAD");
+            if (Post.ContainsKey(path)) methods.Add("POST");
+            if (Put.ContainsKey(path)) methods.Add("PUT");
+            if (Patch.ContainsKey(path)) methods.Add("PATCH");
+            if (Delete.ContainsKey(path)) methods.Add("DELETE");
+            if (Options.ContainsKey(path)) methods.Add("OPTIONS");
+            return string.Join(", ", methods);
         }
 
         public Dictionary<string, FlashRequestAsyncDelegate>? For(HttpMethodsEnum method)
@@ -73,7 +109,7 @@ public sealed class HandlerSet
             {
                 [path] = handler
             };
-            return new RouteTable(this, method, copy);
+            return new RouteTable(this, method, copy, path);
         }
     }
 
@@ -119,6 +155,15 @@ public sealed class HandlerSet
 
     #endregion
 
+    /// <summary>
+    /// Returns the registered path string equal to <paramref name="path"/> (for any method),
+    /// or null when no route uses that path.
+    /// </summary>
+    internal string? FindRegisteredPath(ReadOnlySpan<char> path)
+        => Volatile.Read(ref _routes).PathLookup.TryGetValue(path, out string? registered, out _)
+            ? registered
+            : null;
+
     #region Dispatch
 
     public ValueTask HandleAsync(IFlashHandlerContext context, CancellationToken cancellationToken)
@@ -144,8 +189,7 @@ public sealed class HandlerSet
 
         // If the request method has no handler for this path, check whether some
         // *other* method does; in which case the right response is 405, not 404.
-        var allowHeader = BuildAllowHeaderForPath(routes, path);
-        if (allowHeader is not null)
+        if (routes.AllowByPath.TryGetValue(path, out var allowHeader))
         {
             SetMethodNotAllowed(context.Response, allowHeader);
         }
@@ -156,62 +200,22 @@ public sealed class HandlerSet
         return ValueTask.CompletedTask;
     }
 
-    // Returns a comma-separated method list (RFC 9110 §10.2.1) or null if no method is
-    // registered for the given path. HEAD is implied by GET.
-    private static string? BuildAllowHeaderForPath(RouteTable routes, string path)
-    {
-        StringBuilder? sb = null;
-        bool hasGet = routes.Get.ContainsKey(path);
-        if (hasGet)
-        {
-            Append(ref sb, "GET");
-        }
-        if (hasGet || routes.Head.ContainsKey(path))
-        {
-            Append(ref sb, "HEAD");
-        }
-        AppendIfRegistered(routes.Post, path, ref sb, "POST");
-        AppendIfRegistered(routes.Put, path, ref sb, "PUT");
-        AppendIfRegistered(routes.Patch, path, ref sb, "PATCH");
-        AppendIfRegistered(routes.Delete, path, ref sb, "DELETE");
-        AppendIfRegistered(routes.Options, path, ref sb, "OPTIONS");
-        return sb?.ToString();
-    }
-
-    private static void AppendIfRegistered(
-        Dictionary<string, FlashRequestAsyncDelegate> dict,
-        string path,
-        ref StringBuilder? sb,
-        string methodName)
-    {
-        if (!dict.ContainsKey(path)) return;
-        Append(ref sb, methodName);
-    }
-
-    private static void Append(ref StringBuilder? sb, string methodName)
-    {
-        if (sb is null)
-        {
-            sb = new StringBuilder(methodName);
-        }
-        else
-        {
-            sb.Append(", ").Append(methodName);
-        }
-    }
+    // Shared, never mutated: unmatched requests (scanners, typos) must not allocate a body each.
+    private static readonly byte[] NotFoundBody = "Not Found"u8.ToArray();
+    private static readonly byte[] MethodNotAllowedBody = "Method Not Allowed"u8.ToArray();
 
     private static void SetNotFound(FlashHttpResponse response)
     {
         response.StatusCode = 404;
         response.ReasonPhrase = "Not Found";
-        response.Body = Encoding.UTF8.GetBytes("Not Found");
+        response.Body = NotFoundBody;
     }
 
     private static void SetMethodNotAllowed(FlashHttpResponse response, string allowHeader)
     {
         response.StatusCode = 405;
         response.ReasonPhrase = "Method Not Allowed";
-        response.Body = Encoding.UTF8.GetBytes("Method Not Allowed");
+        response.Body = MethodNotAllowedBody;
         // RFC 9110 §15.5.6: a 405 response MUST include an Allow header.
         response.Headers.Add(new HttpHeader("Allow", allowHeader));
     }

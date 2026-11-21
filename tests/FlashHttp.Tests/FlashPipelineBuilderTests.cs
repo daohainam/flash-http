@@ -135,4 +135,14 @@ public sealed class FlashPipelineBuilderTests
         Assert.False(terminalCalled);
         Assert.Equal(401, ctx.Response.StatusCode);
     }
+
+    [Fact]
+    public void Build_WithoutMiddleware_ReturnsTerminalWithoutWrapping()
+    {
+        HandlerSet.FlashRequestAsyncDelegate terminal = static (_, _) => ValueTask.CompletedTask;
+
+        var app = new FlashPipelineBuilder().Build(terminal);
+
+        Assert.Same(terminal, app);
+    }
 }
